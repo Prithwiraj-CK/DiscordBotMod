@@ -132,7 +132,34 @@ TYPING_MAX_SECONDS = _env_float("TYPING_MAX_SECONDS", 9)
 # looking for.
 WORKER_THREADS = max(1, _env_int("WORKER_THREADS", 2))
 
-ALLOWED_CHANNELS = _parse_channel_ids(os.getenv("ALLOWED_CHANNEL_IDS", ""))
+# ---------------------------------------------------------------------------
+# Where she reads, and the one place she writes.
+#
+# OUTPUT_CHANNEL_ID is hardcoded on purpose. Everything she produces goes here
+# and nowhere else, so a mistake in the watch list can widen what she READS but
+# can never widen what she POSTS. _guard_output() enforces it at the call site
+# as well, so a future edit that forgets cannot quietly start posting into a
+# live support channel.
+# ---------------------------------------------------------------------------
+OUTPUT_CHANNEL_ID = "1546057978921095178"          # #bot-test
+
+GUILD_ID = os.getenv("GUILD_ID", "925207817923743794").strip()
+
+# Individual channels to read.
+WATCH_CHANNEL_IDS = _parse_channel_ids(
+    os.getenv("WATCH_CHANNEL_IDS", "")
+    or "927612226439880834,1509446310552539267,1484774527610392576"
+)
+
+# Categories to read: every text channel inside them, resolved at startup.
+WATCH_CATEGORY_IDS = _parse_channel_ids(
+    os.getenv("WATCH_CATEGORY_IDS", "")
+    or "1509163128636702842,1305503692929110106"
+)
+
+# Filled in by _resolve_watched(). Always includes OUTPUT_CHANNEL_ID so the
+# test channel itself stays usable for direct questions.
+ALLOWED_CHANNELS = set()
 
 # The model emits this exact token when it can't answer. We never show it to
 # the user - we swap it for a human handoff.
@@ -347,11 +374,60 @@ _handled = OrderedDict()     # message ids already answered or in flight
 _attempts = OrderedDict()    # message id -> failed attempts so far
 _CACHE_LIMIT = 2000
 
+_channel_names = {}
 _started_at = None   # set in main(); the sweep will not reach back past it
 _bot = None          # discum client, built in main()
 _self_id = ""        # our own user snowflake, so we never answer ourselves
 _executor = None
 _stop = threading.Event()
+
+
+def _guard_output(channel_id):
+    """The single chokepoint for writing. Refuses anything but the test channel."""
+    if str(channel_id) != OUTPUT_CHANNEL_ID:
+        raise DiscordCallFailed(
+            "refusing to post to channel {}: this bot only ever writes to {}".format(
+                channel_id, OUTPUT_CHANNEL_ID
+            )
+        )
+    return OUTPUT_CHANNEL_ID
+
+
+def _resolve_watched():
+    """Expand the configured channels and categories into one read set.
+
+    Read-only: this lists the guild's channels, it changes nothing. A category
+    that cannot be listed is skipped with a warning rather than failing
+    startup, because losing one category should not take the rest down.
+    """
+    watched = {OUTPUT_CHANNEL_ID}
+    watched |= {str(c) for c in WATCH_CHANNEL_IDS}
+
+    if WATCH_CATEGORY_IDS:
+        try:
+            response = _call(
+                "list channels in guild {}".format(GUILD_ID),
+                requests.get,
+                "https://discord.com/api/v9/guilds/{}/channels".format(GUILD_ID),
+                headers={"Authorization": TOKEN},
+                timeout=20,
+            )
+            channels = response.json()
+        except (DiscordCallFailed, ValueError) as exc:
+            log.warning("Could not expand categories, watching listed channels only: %s", exc)
+            return watched, {}
+
+        wanted = {str(c) for c in WATCH_CATEGORY_IDS}
+        names = {}
+        for channel in channels:
+            cid = str(channel.get("id"))
+            names[cid] = channel.get("name") or cid
+            # 0 text, 5 announcement. Voice and categories themselves are not read.
+            if channel.get("type") in (0, 5) and str(channel.get("parent_id") or "") in wanted:
+                watched.add(cid)
+        return watched, names
+
+    return watched, {}
 
 
 def _trim(cache):
@@ -432,6 +508,15 @@ def _call(description, func, *args, **kwargs):
 
         status = getattr(response, "status_code", None)
 
+        if status is None:
+            # discum handed back something that is not a response, usually a
+            # dropped connection inside its own request layer. Transient, so
+            # it is worth another go rather than losing the whole sweep pass.
+            log.warning("%s returned no status, retrying", description)
+            if _stop.wait(1.5 * (attempt + 1)):
+                raise DiscordCallFailed("{} aborted during shutdown".format(description))
+            continue
+
         if status == 429:
             try:
                 retry_after = float(response.json().get("retry_after", 1.0))
@@ -466,7 +551,9 @@ def _call(description, func, *args, **kwargs):
             "{} returned HTTP {}{}".format(description, status, detail)
         )
 
-    raise DiscordCallFailed("{} still rate limited after 3 tries".format(description))
+    raise DiscordCallFailed(
+        "{} did not succeed after 3 tries (rate limited, or no response)".format(description)
+    )
 
 
 def _parse_timestamp(raw):
@@ -669,55 +756,59 @@ def _answer(message):
 
     answer = answer[:2000]
 
-    # Type for about as long as the answer would take, so it does not appear
-    # instantly. _stop.wait means a shutdown cuts the pause short rather than
-    # holding the process open.
-    try:
-        _bot.typingAction(channel_id)
-    except Exception:
-        pass
-    if _stop.wait(_typing_seconds(answer)):
-        return
+    shadowed = channel_id != OUTPUT_CHANNEL_ID
+    if shadowed:
+        # Her answer is a PROPOSAL, shown in the test channel next to the
+        # question, never sent to the person who asked.
+        where = _channel_names.get(channel_id, channel_id)
+        body = (
+            "**#{}** \u00b7 {}\n"
+            "> {}\n\n"
+            "{}"
+        ).format(where, name, text[:400].replace("\n", "\n> "), answer)
+        body = body[:2000]
+    else:
+        body = answer
+
+    # Typing only makes sense where a person is waiting on her.
+    if not shadowed:
+        try:
+            _bot.typingAction(OUTPUT_CHANNEL_ID)
+        except Exception:
+            pass
+        if _stop.wait(_typing_seconds(body)):
+            return
 
     try:
-        # sendMessage with a message_reference, NOT discum's reply(): reply()
-        # calls sendMessage and forgets to return it, so it always yields None.
-        # Reading that as a failure marks the answer for retry and the sweep
-        # sends the whole thing a second time.
+        target = _guard_output(OUTPUT_CHANNEL_ID)
+        kwargs = {"allowed_mentions": _ALLOWED_MENTIONS}
+        if not shadowed:
+            # A reply arrow only works within the same channel.
+            kwargs["message_reference"] = {
+                "channel_id": target, "message_id": message_id,
+            }
         _call(
-            "reply to message {}".format(message_id),
-            _bot.sendMessage, channel_id, answer,
-            message_reference={"channel_id": channel_id, "message_id": message_id},
-            allowed_mentions=_ALLOWED_MENTIONS,
+            "post answer for message {}".format(message_id),
+            _bot.sendMessage, target, body, **kwargs
         )
     except DiscordCallFailed as exc:
         detail = str(exc)
         if "HTTP 404" in detail:
-            # Deleted while we were thinking. Nothing to retry.
             log.info("Message %s was gone before we could reply", message_id)
         elif "code 200000" in detail:
-            # The server's AutoMod refused the message. Deterministic, so the
-            # sweep retrying it twice more just fails twice more. The answer
-            # never reaches the user, which is worth telling someone about.
             log.warning(
-                "AutoMod blocked the reply to message %s in channel %s. "
-                "The answer was never delivered. Check the server's AutoMod "
-                "rules against what she writes, links especially.",
-                message_id, channel_id,
+                "AutoMod blocked the post for message %s. The answer was never "
+                "delivered. Check the server's AutoMod rules, links especially.",
+                message_id,
             )
-            alert(
-                "AutoMod in <#{}> blocked a reply, so the question went "
-                "unanswered. Usually a link rule.".format(channel_id),
-                key="automod-{}".format(channel_id),
-            )
+            alert("AutoMod blocked a post, so a question went unanswered.",
+                  key="automod-block")
         elif "HTTP 403" in detail:
-            log.warning("No permission to reply in channel %s", channel_id)
-            alert(
-                "Cannot reply in <#{}>, the account may have lost access.".format(channel_id),
-                key="forbidden-{}".format(channel_id),
-            )
+            log.warning("No permission to post in %s", OUTPUT_CHANNEL_ID)
+            alert("Cannot post in the test channel, check permissions.",
+                  key="forbidden-output")
         else:
-            log.warning("Reply failed for message %s: %s", message_id, detail)
+            log.warning("Post failed for message %s: %s", message_id, detail)
             _record_failure(message_id, channel_id, detail)
 
 
@@ -873,13 +964,13 @@ def _check_config():
         problems.append("DISCORD_USER_TOKEN is not set in .env")
     if not os.getenv("OPENAI_API_KEY", "").strip():
         problems.append("OPENAI_API_KEY is not set in .env")
-    if not ALLOWED_CHANNELS:
-        problems.append("ALLOWED_CHANNEL_IDS is empty - the bot would answer nowhere")
+    if not WATCH_CHANNEL_IDS and not WATCH_CATEGORY_IDS:
+        problems.append("WATCH_CHANNEL_IDS and WATCH_CATEGORY_IDS are both empty")
     return problems
 
 
 def main():
-    global _bot, _self_id, _executor, _started_at
+    global _bot, _self_id, _executor, _started_at, ALLOWED_CHANNELS, _channel_names
 
     _started_at = datetime.now(timezone.utc)
 
@@ -904,17 +995,24 @@ def main():
     if not load_knowledge():
         log.warning("knowledge/ is empty - the bot will escalate almost everything.")
 
+    _bot = discum.Client(token=TOKEN, log=False)
+    _bot.gateway.updateSessionData = False
+
+    ALLOWED_CHANNELS, _channel_names = _resolve_watched()
     log.info(
-        "Watching %d channel(s): %s",
-        len(ALLOWED_CHANNELS), ", ".join(sorted(ALLOWED_CHANNELS)),
+        "Reading %d channel(s); posting ONLY to #%s (%s)",
+        len(ALLOWED_CHANNELS),
+        _channel_names.get(OUTPUT_CHANNEL_ID, "bot-test"),
+        OUTPUT_CHANNEL_ID,
     )
+    for cid in sorted(ALLOWED_CHANNELS, key=lambda c: _channel_names.get(c, c)):
+        log.info("    reads #%s%s", _channel_names.get(cid, cid),
+                 "  <- posts here" if cid == OUTPUT_CHANNEL_ID else "")
 
     _executor = ThreadPoolExecutor(max_workers=WORKER_THREADS, thread_name_prefix="answer")
 
-    _bot = discum.Client(token=TOKEN, log=False)
     # Discord's payloads have outgrown discum's unmaintained session-cache
     # parser. This listener only needs raw message events, not cached guild data.
-    _bot.gateway.updateSessionData = False
 
     @_bot.gateway.command
     def _on_event(resp):
