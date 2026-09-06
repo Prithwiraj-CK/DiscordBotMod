@@ -94,9 +94,6 @@ charge next to each fill.
 - LP reward share: a flat 5% of settled liquidity rewards, taken in the daily
   sweep. No discounts apply.
 
-Never quote a specific user their fee total or promise a discount applies to
-them. Escalate.
-
 ## Welcome bonus
 
 There is exactly one. A verified deposit of at least $50 into the user's trading
@@ -105,8 +102,7 @@ wallet within seven days of the wallet being created raises that user's
 the wallet is created; no action is needed.
 
 It is not a trading-fee discount, not a zero-fee period, and it does not
-activate from trading. If someone believes they were promised something else,
-escalate rather than negotiating.
+activate from trading.
 
 ## Common questions
 
@@ -123,8 +119,7 @@ book never comes to it. Both are expected behaviour, but a specific unfilled
 order is still an escalation.
 
 **Why has my winning position not paid out?** Redemption is automatic but can
-stall, most often when the wallet cannot cover gas. Never tell a user their
-funds are safe or on the way. Escalate.
+stall, most often when the wallet cannot cover gas.
 
 **Did the AI assistant place this trade?** It cannot place trades unconfirmed.
 Escalate.

@@ -343,6 +343,12 @@ _ESCALATIONS = (
 )
 
 
+# Roles so the staff ping works, users so a name renders, and deliberately no
+# "everyone": nothing the model writes should ever be able to @everyone a
+# server. replied_user False keeps the reply from pinging the asker.
+_ALLOWED_MENTIONS = {"parse": ["users", "roles"], "replied_user": False}
+
+
 def _escalation_reply():
     mention = "<@&{}> ".format(STAFF_ROLE_ID) if STAFF_ROLE_ID else ""
     return mention + random.choice(_ESCALATIONS)
@@ -435,9 +441,15 @@ def _answer(message):
         return
 
     try:
+        # sendMessage with a message_reference, NOT discum's reply(): reply()
+        # calls sendMessage and forgets to return it, so it always yields None.
+        # Reading that as a failure marks the answer for retry and the sweep
+        # sends the whole thing a second time.
         _call(
             "reply to message {}".format(message_id),
-            _bot.reply, channel_id, message_id, answer,
+            _bot.sendMessage, channel_id, answer,
+            message_reference={"channel_id": channel_id, "message_id": message_id},
+            allowed_mentions=_ALLOWED_MENTIONS,
         )
     except DiscordCallFailed as exc:
         detail = str(exc)
