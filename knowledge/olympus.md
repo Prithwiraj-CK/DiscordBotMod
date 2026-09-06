@@ -8,6 +8,29 @@ web app rather than a Discord-native bot. Sign-in is handled by Privy.
 
 Latency matters here: this is copy trading, so execution speed affects fills.
 
+## How it is built
+
+Useful for judging whether a problem is the user's setup or ours.
+
+**Frontend** (`apps/web-v2`, Next.js). The signed-in app covers markets and
+market pages, sports (by league and event), crypto, bonds, perps, multiply,
+leverage, combos, consensus, LP rewards, the leaderboard and top wallets,
+per-trader pages, multi-wallet, search and rewards.
+
+**API** (`apps/api`, Hono + tRPC) and **worker** (`apps/worker`) share a
+PostgreSQL database through Drizzle ORM, with Redis for queues and caching and
+ClickHouse for analytics. The worker owns the things that run on their own:
+the leader listener, the failsafe sweep, the scheduler, perps automation and
+perps protection.
+
+**Chain and market access**: `viem`/`ethers` against Polygon, a Polymarket API
+package for markets and the CLOB, Privy for wallets and auth.
+
+**Wallets**: every user has a signing key (a Privy embedded wallet) and a
+separate trading address where funds and positions actually live. The signer
+never holds trading funds. When someone reports a balance on "the wrong
+address", this distinction is usually why, and it is an escalation.
+
 ## What users get
 
 - Copy-trading dashboard: follow leaders, configure per-leader settings
@@ -51,6 +74,40 @@ against what the records say they should hold, then closing the difference. A
 **Stray** is a holding whose leader has sold. An **Orphan** is a holding with no
 attribution record at all.
 
+**In-Play Delay** - Polymarket holds orders on live sports and esports markets
+in a non-matching state for a few seconds. An order that never clears that state
+in time is treated as rejected. This is Polymarket's behaviour, not ours.
+
+**Maker Copy-Buy** - a copy-buy priced at or below the best bid, so it rests on
+the book instead of crossing the spread. It avoids taker fees, at the cost of an
+uncertain and sometimes very late fill, or none at all.
+
+## Fees
+
+Charged on copy trades (buy, sell, redeem), recorded as trades execute and
+collected once daily on-chain, not per trade. A user will not see a separate
+charge next to each fill.
+
+- Normal trade fee: 0.75% base, 0.20% reduced. Discord role, admin and other
+  discounts can apply.
+- LP fill fee: a fixed 0.2% on both legs of an LP order. No discounts apply.
+- LP reward share: a flat 5% of settled liquidity rewards, taken in the daily
+  sweep. No discounts apply.
+
+Never quote a specific user their fee total or promise a discount applies to
+them. Escalate.
+
+## Welcome bonus
+
+There is exactly one. A verified deposit of at least $50 into the user's trading
+wallet within seven days of the wallet being created raises that user's
+**referral commission** from 25% to 30%. The seven days start automatically when
+the wallet is created; no action is needed.
+
+It is not a trading-fee discount, not a zero-fee period, and it does not
+activate from trading. If someone believes they were promised something else,
+escalate rather than negotiating.
+
 ## Common questions
 
 **Why did my copy not match the leader's size?** Copy sizing is driven by the
@@ -59,6 +116,15 @@ If the numbers still look wrong, escalate rather than explaining the discrepancy
 
 **Why do I hold something my leader already sold?** That is an Orphan or Stray.
 The failsafe is designed to catch it. Escalate specific instances.
+
+**Why did my order never fill?** On live sports markets, the in-play delay can
+push an order past its window. A maker copy-buy also simply may not fill if the
+book never comes to it. Both are expected behaviour, but a specific unfilled
+order is still an escalation.
+
+**Why has my winning position not paid out?** Redemption is automatic but can
+stall, most often when the wallet cannot cover gas. Never tell a user their
+funds are safe or on the way. Escalate.
 
 **Did the AI assistant place this trade?** It cannot place trades unconfirmed.
 Escalate.

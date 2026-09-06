@@ -5,7 +5,36 @@
 A Discord bot for copy-trading on Solana. It mirrors a target wallet's Meteora
 DLMM/DAMM liquidity actions and token swaps into the user's own Valhalla wallet,
 in real time. Everything happens through Discord slash commands; there is no
-separate app to install.
+separate app to install. A companion website shows the same positions and
+settings.
+
+## How it is built
+
+Useful for judging whether a problem is the user's setup or ours.
+
+**Discord bot** (`discord.js`, TypeScript, run under PM2). `src/commands` holds
+the slash commands, with `src/buttons`, `src/modals` and `src/select-menus`
+providing the interactive panels behind `/settings`. Data lives in PostgreSQL
+through TypeORM (`src/database/entities`), with Redis for caching and queues.
+
+**Copy-trade pipeline** (`src/scripts/copy-trade`). A **watcher** subscribes to
+target wallets on-chain over gRPC or WebSocket. When one trades, the action goes
+onto a BullMQ queue in Redis, and a **worker** executes the mirrored trade. A
+separate **failsafe** sweep catches positions the live path missed. Follow,
+unfollow and enable/disable events reach the watcher over Redis pub/sub, so
+changes take effect without a restart.
+
+**Website** (`nextjs-privy-oauth`): a Next.js frontend, an API app and its own
+worker, with Privy handling sign-in. Both the bot and the website call one
+shared rules module (`@valhalla/application`) so the two cannot drift apart.
+
+**Chain and market data**: Meteora SDKs for DLMM and DAMM, Jupiter for swaps and
+routing, GMGN for token analytics, Shyft for wallet transaction history. RPC
+health is monitored centrally with automatic failover.
+
+Practical consequence: a copy that never happened is usually a *decision* by the
+gates below, not a crash. A copy that started and failed is usually chain-side
+(SOL, slippage, RPC).
 
 ## Getting started
 
@@ -49,11 +78,44 @@ decides when a copy should happen.
 **Passcode** - a user-chosen PIN authorizing sensitive actions such as withdraw
 and private-key export. Stored hashed only, and never shown back to anyone.
 
+## Why an entry was not copied
+
+Most "it didn't copy" questions are one of these. All are per-follow unless
+stated. If none fits, escalate rather than inventing a reason.
+
+**Entry Mode** - which of a target's entries get copied: *SOL Only*, *SOL or
+USDC*, or *Any*. SOL Only is an absolute guarantee the bot never swaps the
+user's SOL into USDC.
+
+**Pool Gate** - the pool must contain a quote asset the mode allows. Only SOL and
+USDC pools are supported at all, whatever the mode.
+
+**Shape Gate** (DLMM only) - the restrictive modes require the target to have
+funded exactly one side of the position with a permitted quote asset. A
+two-sided deposit does not qualify. Never applies to DAMM.
+
+**Min Target Position Size** - a floor in SOL on the *target's* deposit, not the
+user's spend. Gates opens only; adds are never size-checked.
+
+**Max Token Deposited** ("Max per Token") - a per-user ceiling on total SOL in
+one token across every position and every leader. A breach shrinks an add to the
+room left, but refuses an open outright.
+
+**Launch Sniper Gate** - refuses entry when the token's bundle-bot share (from
+GMGN) is at or above a threshold the user sets. Off by default.
+
+**Infinite Add Liquidity** - off means the position never grows after its entry.
+There is no setting that copies only some adds.
+
+**Clamping** - a platform safety rail on a restricted target forces the effective
+mode down to SOL Only, whatever the user chose. Users are told when this happens.
+
 ## Common issues
 
 **Nothing is copying.** Usual causes, in order: copy trading is disabled in
-`/settings`, the wallet is under the SOL minimum, no wallets are followed, or the
-followed wallet simply has not traded on Meteora recently.
+`/settings`, the wallet is under the SOL minimum, no wallets are followed, the
+followed wallet has not traded on Meteora recently, or one of the gates above is
+filtering the entries out.
 
 **A position failed to open.** Most often insufficient SOL for the temporary
 deposit each position requires.
@@ -63,6 +125,16 @@ Phantom first. Positions live on Meteora.
 
 **A followed wallet looks inactive.** Copies only fire on real on-chain activity.
 No trades from the target means nothing to mirror.
+
+**PnL looks wrong.** PnL is `current value + fees earned - deposited`. Claimed
+fees count once, in fees earned, never inside current value. Deposited counts
+every add and is never reduced by a withdrawal, so a position the target drained
+and refilled will show deposited far above current value. Wallet-explorer rows
+for *target* wallets show Meteora's own figure instead, which includes
+withdrawals, so the two will not always agree.
+
+**A position shows read-only.** It is *untracked*: it exists on-chain in the
+user's wallet but the bot never opened it, so the bot will not manage it.
 
 ## Escalate to a human
 
