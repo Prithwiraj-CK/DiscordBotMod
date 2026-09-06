@@ -27,6 +27,7 @@ import logging
 import os
 import random
 import re
+from difflib import SequenceMatcher
 import threading
 from collections import OrderedDict, deque
 from concurrent.futures import ThreadPoolExecutor
@@ -511,6 +512,37 @@ def _typing_seconds(text):
     return seconds * random.uniform(0.8, 1.2)
 
 
+def _normalise(text):
+    return " ".join((text or "").lower().split())
+
+
+def _similar(a, b):
+    return SequenceMatcher(None, _normalise(a), _normalise(b)).ratio()
+
+
+# How alike two messages must be to count as the same question being asked again.
+_REPEAT_RATIO = 0.85
+
+
+def _strip_repeat_anchor(turns, text):
+    """Drop her own past answers when this question has already been asked.
+
+    Telling her in the prompt not to copy herself is not enough: with two
+    near-identical exchanges above, the pattern in the context wins every time
+    and she reissues the same answer, measured 3 times out of 3. Her previous
+    wording is simply removed instead, so there is nothing to copy. The user's
+    repeated asks stay, because knowing they had to ask three times is the
+    useful part.
+    """
+    asked_before = any(
+        turn["role"] == "user" and _similar(turn["content"], text) >= _REPEAT_RATIO
+        for turn in turns
+    )
+    if not asked_before:
+        return turns, False
+    return [t for t in turns if t["role"] != "assistant"], True
+
+
 def _system_prompt():
     """Rebuilt per question so an edit to knowledge/ is live without a restart."""
     return SYSTEM_PROMPT.format(knowledge=load_knowledge())
@@ -562,14 +594,26 @@ def _answer(message):
 
     try:
         turns = _recent_context(channel_id, message_id)
+        turns, repeated = _strip_repeat_anchor(turns, "{}: {}".format(name, text))
         turns.append({"role": "user", "content": "{}: {}".format(name, text)})
+
+        prompt = _system_prompt()
+        if repeated:
+            log.info("Message %s repeats an earlier question, answering fresh", message_id)
+            prompt += (
+                "\n\nTHEY HAVE ASKED THIS BEFORE AND ARE ASKING AGAIN.\n"
+                "Your earlier answers have been removed from the conversation above "
+                "on purpose. Whatever you said last time did not land, so do not "
+                "reconstruct it. Answer from scratch: lead with the single most "
+                "concrete thing you have, a link above all, and keep it short."
+            )
 
         try:
             _bot.typingAction(channel_id)   # best effort, never worth failing over
         except Exception:
             pass
 
-        answer = ask_llm(_system_prompt(), turns)
+        answer = ask_llm(prompt, turns)
     except Exception as exc:
         log.exception("Failed to answer message %s", message_id)
         _record_failure(message_id, channel_id, "{}: {}".format(type(exc).__name__, exc))
