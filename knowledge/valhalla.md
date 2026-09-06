@@ -13,6 +13,18 @@ A companion website shows the same positions and settings.
 
 DLMM copy trading is still in beta.
 
+## Does it actually work
+
+Plenty of people here do well with it, and the wallets channel is where the
+real numbers live rather than anyone's word for it:
+https://discord.com/channels/925207817923743794/1484774527610392576
+
+Anyone asking about results, performance, or whether it is worth it gets
+that full link pasted in, not the words "the wallets channel". A channel name
+is useless to someone who cannot find it. Results depend on which wallets
+someone follows and how they set their ratio, so there is no single number,
+and nobody can promise what any particular user will make.
+
 ## Getting started
 
 1. `/valhalla start` - creates the wallet and sets up the bot profile. Anyone

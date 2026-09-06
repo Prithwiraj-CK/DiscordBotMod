@@ -52,6 +52,21 @@ def _timeout_seconds():
         return 30.0
 
 
+def _temperature():
+    """How much the wording varies between calls.
+
+    0.3 is right for a deterministic extractor and wrong for a person: at that
+    setting she answers "are you single" with the same sentence every time,
+    which reads as a canned response, because it is one. The facts come from
+    the reference material and the escalate rules are absolute, so the extra
+    variance lands on phrasing rather than content.
+    """
+    try:
+        return float(os.getenv("LLM_TEMPERATURE", "0.9"))
+    except ValueError:
+        return 0.9
+
+
 def _max_attempts():
     try:
         return max(1, int(os.getenv("LLM_MAX_ATTEMPTS", "3")))
@@ -92,7 +107,7 @@ def ask_llm(system_prompt, messages):
                 model=os.getenv("OPENAI_MODEL", "gpt-4o-mini"),
                 messages=[{"role": "system", "content": system_prompt}, *messages],
                 max_tokens=400,
-                temperature=0.3,
+                temperature=_temperature(),
             )
             return (response.choices[0].message.content or "").strip()
 

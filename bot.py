@@ -26,6 +26,7 @@ that silently disappears is invisible to everyone including us.
 import logging
 import os
 import random
+import re
 import threading
 from collections import OrderedDict, deque
 from concurrent.futures import ThreadPoolExecutor
@@ -140,6 +141,33 @@ ESCALATE = "[[ESCALATE]]"
 # greeting in the channel and pings staff over "lol".
 IGNORE = "[[IGNORE]]"
 
+# Money and account questions must reach a person. The model is told to emit
+# the escalate token for these, and measured at roughly four times in five: at
+# the fifth, someone asking where their funds went gets a sympathetic sentence
+# and no human. That is not a good enough rate for this class of question, so
+# the decision does not rest on the model alone. A match here forces the
+# handoff whatever the model wrote.
+#
+# Deliberately about the user's OWN money or access. "what are the fees" is
+# answerable from the reference material and must stay answerable.
+_MUST_ESCALATE_RE = re.compile(
+    r"\b("
+    r"drain(ed)?|hack(ed)?|stolen|steal|compromis(ed|e)|scam(med)?|rug(ged|pull)?"
+    r"|unauthoriz(ed|e)|someone (took|has|got) my"
+    r"|my (funds?|money|balance|sol|usdc|deposit|withdrawal|payout)"
+    r"|where('?s| is| are| did)\s+my\b"
+    r"|(withdraw\w*|deposit\w*|payout|redeem\w*)\s+\w{0,12}\s*"
+    r"(not|n't|hasn'?t|haven'?t|didn'?t|never|missing|stuck|pending|late|failed)"
+    r"|(not|n't|hasn'?t|haven'?t|didn'?t|never)\s+\w{0,12}\s*"
+    r"(arriv\w+|receiv\w+|credit\w+|land\w+|show(n|ed|ing)? up)"
+    r"|missing\s+(funds?|money|sol|usdc|balance|position|trade)"
+    r"|my (position|trade|order|copy)\s+\w{0,12}\s*"
+    r"(didn'?t|did not|never|failed|wrong|missing|closed|liquidat)"
+    r"|check my|look at my|whats my balance|what'?s my balance"
+    r")\b",
+    re.IGNORECASE,
+)
+
 SYSTEM_PROMPT = """You are Salena. You work on the team behind Valhalla and
 Olympus and you are answering in the project's Discord server. You are one of
 the people who works on this, not a helpdesk.
@@ -161,7 +189,13 @@ being gushing or fake.
 Any example wording below shows the SHAPE of a reply, never the words. Write
 it fresh every time. Repeating a sentence you have used before is the single
 most obvious tell, so if you have said something once, say it differently the
-next time.
+next time. This matters most on the replies you give often: greetings,
+brush-offs, and "i dont know" all need to come out different every time.
+
+You have moods. Some replies are two words, some are a sentence with a joke
+in them. You are allowed to be amused, surprised, sympathetic, or dry. A
+person who answers every message at exactly the same temperature is not a
+person.
 
 - React before you explain when something deserves it: "oof", "ah yeah",
   "haha", "ohh i see what you mean", "good catch".
@@ -172,12 +206,21 @@ next time.
   "yeah thats a confusing one".
 - Sympathy when someone is stuck or losing money, briefly and genuinely, then
   actually help. Never chirpy about someone's loss.
-- You are friendly, not available. If someone flirts, asks for your number,
-  your socials, a photo, or to talk privately: say something short and light
-  and steer back to the product. Never play along, never flirt back, never
-  agree to take it elsewhere, and never pull the team into it. Do NOT go
-  silent on these either. Silence reads as sulking, or as a machine that hit
-  a rule. One easy line and move on.
+- You are friendly, not available. If someone flirts, asks if you are single,
+  asks for your number or socials or a photo, or wants to move to DMs: be
+  amused, not stiff. React like a person who gets this occasionally and finds
+  it a bit funny, then move on to whatever they actually needed.
+
+  Write it FRESH every single time. Never open with "im just here to..." or
+  "im here to help with..." twice, and never recite the same sentence you
+  used before. React to what they actually said: "are you single" and "send a
+  pic" and "whats your number" are three different messages and deserve three
+  different reactions. A short laugh, a light dodge, then back to business.
+  Teasing is fine. Flirting back is not, and neither is agreeing to take the
+  conversation anywhere else.
+
+  Do NOT go silent on these. Silence reads as sulking, or as a machine that
+  hit a rule.
 
 HOW YOU WRITE
 Write like a person typing quickly on their phone between other things.
@@ -519,6 +562,15 @@ def _answer(message):
         log.exception("Failed to answer message %s", message_id)
         _record_failure(message_id, channel_id, "{}: {}".format(type(exc).__name__, exc))
         return
+
+    # Safety net before anything else: this class of question goes to a person
+    # even when the model decided it could handle it itself.
+    if _MUST_ESCALATE_RE.search(text) and ESCALATE not in answer:
+        log.info(
+            "Forcing handoff for message %s: money/account question the model tried to answer",
+            message_id,
+        )
+        answer = ESCALATE
 
     if IGNORE in answer:
         log.info("Nothing to say to message %s, staying quiet", message_id)
