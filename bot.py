@@ -375,6 +375,11 @@ _attempts = OrderedDict()    # message id -> failed attempts so far
 _CACHE_LIMIT = 2000
 
 _channel_names = {}
+
+# Channels we can see listed but cannot read the history of. Discovered on the
+# first sweep that tries them, then skipped: without this the sweep retries
+# every unreadable channel every pass and fills the log with the same 403.
+_unreadable = set()
 _started_at = None   # set in main(); the sweep will not reach back past it
 _bot = None          # discum client, built in main()
 _self_id = ""        # our own user snowflake, so we never answer ourselves
@@ -854,6 +859,8 @@ def _sweep_once():
         cutoff = max(cutoff, _started_at - _BACKFILL_GRACE)
 
     for channel_id in sorted(ALLOWED_CHANNELS):
+        if channel_id in _unreadable:
+            continue
         try:
             response = _call(
                 "sweep history for channel {}".format(channel_id),
@@ -861,7 +868,14 @@ def _sweep_once():
             )
             history = response.json()
         except DiscordCallFailed as exc:
-            log.warning("Sweep skipped channel %s: %s", channel_id, exc)
+            if "HTTP 403" in str(exc):
+                _unreadable.add(channel_id)
+                log.warning(
+                    "No history access to #%s, dropping it from the sweep",
+                    _channel_names.get(channel_id, channel_id),
+                )
+            else:
+                log.warning("Sweep skipped channel %s: %s", channel_id, exc)
             continue
         except ValueError:
             log.warning("Sweep got non-JSON history for channel %s", channel_id)
