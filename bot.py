@@ -7,8 +7,11 @@ knowledge/, and hands off to a human when it doesn't know.
 import logging
 import os
 import time
+from collections import OrderedDict
+from datetime import timedelta
 
 import discord
+from discord.ext import tasks
 from dotenv import load_dotenv
 
 from knowledge import load_knowledge
@@ -26,6 +29,12 @@ TOKEN = os.getenv("DISCORD_BOT_TOKEN", "").strip()
 STAFF_ROLE_ID = os.getenv("STAFF_ROLE_ID", "").strip()
 CONTEXT_MESSAGES = int(os.getenv("CONTEXT_MESSAGES", "8"))
 USER_COOLDOWN = float(os.getenv("USER_COOLDOWN_SECONDS", "10"))
+
+# Catch-up sweep: how often to look for messages we missed, how far back to
+# look, and how many we're willing to answer in one pass.
+SWEEP_MINUTES = float(os.getenv("SWEEP_MINUTES", "5"))
+SWEEP_LOOKBACK_MINUTES = float(os.getenv("SWEEP_LOOKBACK_MINUTES", "30"))
+SWEEP_MAX_REPLIES = int(os.getenv("SWEEP_MAX_REPLIES", "5"))
 
 ALLOWED_CHANNELS = {
     int(cid)
@@ -60,9 +69,19 @@ REFERENCE MATERIAL
 
 _last_seen: dict[int, float] = {}
 
+# Message IDs we've already answered, so the sweep never double-replies.
+# Bounded - this is a dedupe cache, not a record.
+_handled: OrderedDict = OrderedDict()
+
 intents = discord.Intents.default()
 intents.message_content = True
 client = discord.Client(intents=intents)
+
+
+def _mark_handled(message_id: int) -> None:
+    _handled[message_id] = None
+    while len(_handled) > 2000:
+        _handled.popitem(last=False)
 
 
 def _on_cooldown(user_id: int) -> bool:
@@ -90,24 +109,9 @@ async def _recent_context(channel, upto: discord.Message) -> list[dict]:
     return turns
 
 
-@client.event
-async def on_ready():
-    log.info("Connected as %s", client.user)
-    if not ALLOWED_CHANNELS:
-        log.warning("ALLOWED_CHANNEL_IDS is empty - the bot will not answer anywhere.")
-    if not KNOWLEDGE:
-        log.warning("knowledge/ is empty - the bot will escalate almost everything.")
-
-
-@client.event
-async def on_message(message: discord.Message):
-    if message.author.bot or message.channel.id not in ALLOWED_CHANNELS:
-        return
-    if not message.content.strip():
-        return
-    if _on_cooldown(message.author.id):
-        return
-
+async def _answer(message: discord.Message) -> None:
+    """Build context, ask the model, reply. Shared by live events and the sweep."""
+    _mark_handled(message.id)
     try:
         async with message.channel.typing():
             turns = await _recent_context(message.channel, message)
@@ -127,6 +131,74 @@ async def on_message(message: discord.Message):
         )
 
     await message.reply(answer[:2000], mention_author=False)
+
+
+@tasks.loop(minutes=SWEEP_MINUTES)
+async def catch_up():
+    """Answer anything we missed while offline or between gateway hiccups.
+
+    The gateway is the primary path - this is a safety net, so on a healthy bot
+    it should find nothing almost every time.
+    """
+    cutoff = discord.utils.utcnow() - timedelta(minutes=SWEEP_LOOKBACK_MINUTES)
+
+    for channel_id in ALLOWED_CHANNELS:
+        channel = client.get_channel(channel_id)
+        if channel is None:
+            log.warning("Channel %s not visible to the bot - check permissions", channel_id)
+            continue
+
+        pending, already_replied = [], set()
+        try:
+            async for message in channel.history(limit=100, after=cutoff):
+                if message.author.id == client.user.id:
+                    if message.reference:
+                        already_replied.add(message.reference.message_id)
+                elif not message.author.bot and message.content.strip():
+                    pending.append(message)
+        except discord.Forbidden:
+            log.warning("No history permission in channel %s", channel_id)
+            continue
+
+        sent = 0
+        for message in pending:
+            if sent >= SWEEP_MAX_REPLIES:
+                log.info("Sweep hit its cap in channel %s - rest waits for next pass", channel_id)
+                break
+            if message.id in _handled or message.id in already_replied:
+                continue
+            log.info("Catch-up: answering missed message %s", message.id)
+            await _answer(message)
+            sent += 1
+
+
+@catch_up.before_loop
+async def _before_catch_up():
+    await client.wait_until_ready()
+
+
+@client.event
+async def on_ready():
+    log.info("Connected as %s", client.user)
+    if not ALLOWED_CHANNELS:
+        log.warning("ALLOWED_CHANNEL_IDS is empty - the bot will not answer anywhere.")
+    if not KNOWLEDGE:
+        log.warning("knowledge/ is empty - the bot will escalate almost everything.")
+    if not catch_up.is_running():
+        catch_up.start()
+        log.info("Catch-up sweep running every %s min", SWEEP_MINUTES)
+
+
+@client.event
+async def on_message(message: discord.Message):
+    if message.author.bot or message.channel.id not in ALLOWED_CHANNELS:
+        return
+    if not message.content.strip():
+        return
+    if _on_cooldown(message.author.id):
+        return
+
+    await _answer(message)
 
 
 KNOWLEDGE = load_knowledge()
