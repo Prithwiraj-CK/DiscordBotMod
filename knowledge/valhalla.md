@@ -16,7 +16,7 @@ DLMM copy trading is still in beta.
 ## Results, and which wallets to follow
 
 Plenty of people here do well with it, and the wallets channel is where the
-real numbers live rather than anyone's word for it. Send people to the **valhalla wallets** channel in this server.
+real numbers live rather than anyone's word for it. The **valhalla wallets** channel in this server is where the real numbers are.
 
 Name it in plain words. Do NOT write it as a <#id> channel mention and do NOT
 write a discord.com/channels/... URL: this account cannot see that channel, so

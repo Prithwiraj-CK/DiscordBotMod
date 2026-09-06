@@ -51,8 +51,7 @@ trading without them, that is a bug worth escalating immediately.
 
 ## Results, and which leaders to follow
 
-Plenty of people here do well with it. Send people to the **olympus wallets**
-channel in this server for the real numbers.
+Plenty of people here do well with it. The **olympus wallets** channel in this server is where the real numbers are.
 
 Name it in plain words. Do NOT write it as a <#id> channel mention and do NOT
 write a discord.com/channels/... URL: this account cannot see that channel, so
