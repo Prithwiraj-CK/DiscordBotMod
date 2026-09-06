@@ -16,26 +16,22 @@ DLMM copy trading is still in beta.
 ## Results, and which wallets to follow
 
 Plenty of people here do well with it, and the wallets channel is where the
-real numbers live rather than anyone's word for it. Point people at it by
-writing exactly this, which Discord turns into a clickable channel link:
+real numbers live rather than anyone's word for it. Send people to the **valhalla wallets** channel in this server.
 
-<#1484774527610392576>
+Name it in plain words. Do NOT write it as a <#id> channel mention and do NOT
+write a discord.com/channels/... URL: this account cannot see that channel, so
+Discord blocks both forms and the whole reply is silently never posted.
 
-Write it in that form, never as a discord.com/channels/... URL. This server's
-AutoMod blocks those, so a reply containing one is silently never posted.
-
-That mention is the answer to all of these, and it always goes in the reply:
+That channel is the answer to all of these, and it always goes in the reply:
 - is it profitable / does it work / is it worth it / any good results
 - which wallets should i follow / any good wallets to copy
 - where can i see performance
 
-`/valhalla top_trade_wallets` is worth mentioning alongside it, never instead
-of it. The command ranks wallets; the channel is where people post what they
+`/valhalla top_trade_wallets` is worth mentioning alongside it: unlike the
+channel it is a command anyone can run right there. The command ranks wallets; the channel is where people post what they
 actually made.
 
-Anyone asking about results, performance, or whether it is worth it gets
-that full link pasted in, not the words "the wallets channel". A channel name
-is useless to someone who cannot find it. Results depend on which wallets
+ Results depend on which wallets
 someone follows and how they set their ratio, so there is no single number,
 and nobody can promise what any particular user will make.
 
