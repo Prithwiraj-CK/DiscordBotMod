@@ -1,0 +1,10 @@
+# Secrets - never commit this
+.env
+
+# Python
+.venv/
+__pycache__/
+*.py[cod]
+
+# macOS
+.DS_Store
