@@ -1,6 +1,7 @@
 # Valhalla Bot
 
 Official docs: https://valhalla-bot.gitbook.io/valhalla-bot
+Companion site for Olympus: https://olympusx.app
 
 ## What it is
 
@@ -12,16 +13,10 @@ A companion website shows the same positions and settings.
 
 DLMM copy trading is still in beta.
 
-## Access
-
-Not open to everyone. A user needs a **Decoder NFT** or a **Blink
-subscription**, and `/valhalla start` also requires a **referral code** from an
-existing Valhalla Discord member.
-
 ## Getting started
 
-1. `/valhalla start` - creates the wallet and sets up the bot profile. Needs a
-   referral code.
+1. `/valhalla start` - creates the wallet and sets up the bot profile. Anyone
+   can run it; no referral code is needed.
 2. `/valhalla export_keys` - exports the wallet keys. **Set a PIN here.** The
    PIN is what stops anyone withdrawing even if the Discord account is
    compromised.

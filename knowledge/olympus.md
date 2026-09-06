@@ -1,10 +1,13 @@
 # Olympus
 
+Web app: https://olympusx.app
+
 ## What it is
 
 A Polymarket copy-trading platform. It watches leader wallets on Polymarket and
 automatically mirrors their trades for followers. Unlike Valhalla, Olympus is a
-web app rather than a Discord-native bot. Sign-in is handled by Privy.
+web app rather than a Discord-native bot, at https://olympusx.app. Sign-in is
+handled by Privy, on the site itself; there is nothing to install.
 
 Latency matters here: this is copy trading, so execution speed affects fills.
 
