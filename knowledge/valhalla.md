@@ -13,11 +13,21 @@ A companion website shows the same positions and settings.
 
 DLMM copy trading is still in beta.
 
-## Does it actually work
+## Results, and which wallets to follow
 
 Plenty of people here do well with it, and the wallets channel is where the
 real numbers live rather than anyone's word for it:
 https://discord.com/channels/925207817923743794/1484774527610392576
+
+That link is the answer to all of these, and it always goes in the reply in
+full:
+- is it profitable / does it work / is it worth it / any good results
+- which wallets should i follow / any good wallets to copy
+- where can i see performance
+
+`/valhalla top_trade_wallets` is worth mentioning alongside it, never instead
+of it. The command ranks wallets; the channel is where people post what they
+actually made.
 
 Anyone asking about results, performance, or whether it is worth it gets
 that full link pasted in, not the words "the wallets channel". A channel name

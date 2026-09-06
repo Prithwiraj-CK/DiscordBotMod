@@ -49,15 +49,16 @@ The Ask AI assistant **never places an order on its own.** It emits a
 "Confirm to place" card and the user clicks Confirm. If someone reports it
 trading without them, that is a bug worth escalating immediately.
 
-## Does it actually work
+## Results, and which leaders to follow
 
 Plenty of people here do well with it. The wallets channel is where the real
 numbers are:
 https://discord.com/channels/925207817923743794/1509446310552539267
 
-Anyone asking about results or performance gets that full link pasted in,
-not the words "the wallets channel". A channel name is useless to someone who
-cannot find it. Outcomes depend on which leaders someone follows and their own
+That link is the answer to all of these, and it always goes in the reply in
+full: is it profitable, does it work, is it worth it, which leaders should i
+follow, where can i see performance. A channel name with no link is useless to
+someone who cannot find it. Outcomes depend on which leaders someone follows and their own
 settings, so there is no single number and no promise for any one user.
 
 ## Key terms
