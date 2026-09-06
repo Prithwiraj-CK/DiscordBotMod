@@ -78,9 +78,8 @@ nothing almost every time.
   than guess, so a thin `knowledge/` means lots of handoffs. Fix that by
   writing more knowledge, not by softening the prompt — a confidently wrong
   answer to a real user costs more than a handoff.
-- **Cooldown.** One question per user per `USER_COOLDOWN_SECONDS`. Messages
-  dropped by the cooldown are marked handled, so the sweep doesn't answer them
-  five minutes later and undo it.
+- **No per-user rate limit.** Every qualifying message gets an answer, however
+  fast they arrive. `WORKER_THREADS` is the only thing bounding concurrency.
 - **Keys.** `.env` only. Don't commit it — add it to `.gitignore`.
 
 ## When things go wrong

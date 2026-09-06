@@ -27,7 +27,6 @@ import logging
 import os
 import random
 import threading
-import time
 from collections import OrderedDict
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta, timezone
@@ -98,7 +97,6 @@ def _parse_channel_ids(raw):
 TOKEN = os.getenv("DISCORD_USER_TOKEN", "").strip()
 STAFF_ROLE_ID = os.getenv("STAFF_ROLE_ID", "").strip()
 CONTEXT_MESSAGES = _env_int("CONTEXT_MESSAGES", 8)
-USER_COOLDOWN = _env_float("USER_COOLDOWN_SECONDS", 10)
 
 # Catch-up sweep: how often to look for messages we missed, how far back to
 # look, and how many we're willing to answer in one pass.
@@ -118,7 +116,7 @@ TYPING_MAX_SECONDS = _env_float("TYPING_MAX_SECONDS", 9)
 
 # Answers in flight at once. Small on purpose: a user account posting in
 # parallel across channels is exactly what automated-behaviour detection is
-# looking for, and the cooldown means there is rarely a queue anyway.
+# looking for.
 WORKER_THREADS = max(1, _env_int("WORKER_THREADS", 2))
 
 ALLOWED_CHANNELS = _parse_channel_ids(os.getenv("ALLOWED_CHANNEL_IDS", ""))
@@ -200,7 +198,6 @@ REFERENCE MATERIAL
 # ---------------------------------------------------------------------------
 
 _state_lock = threading.Lock()
-_last_seen = OrderedDict()   # user id -> monotonic time of last answered question
 _handled = OrderedDict()     # message ids already answered or in flight
 _attempts = OrderedDict()    # message id -> failed attempts so far
 _CACHE_LIMIT = 2000
@@ -233,23 +230,6 @@ def _reserve(message_id):
 def _is_handled(message_id):
     with _state_lock:
         return message_id in _handled
-
-
-def _on_cooldown(user_id):
-    now = time.monotonic()
-    with _state_lock:
-        previous = _last_seen.get(user_id)
-
-        # "Never seen" is checked explicitly, not as a 0.0 default. monotonic()
-        # starts near zero, so subtracting a 0.0 default would put every user on
-        # cooldown for the first USER_COOLDOWN seconds of the process, and those
-        # messages are marked handled, which would drop them for good.
-        if previous is not None and now - previous < USER_COOLDOWN:
-            return True
-        _last_seen[user_id] = now
-        _last_seen.move_to_end(user_id)
-        _trim(_last_seen)
-        return False
 
 
 def _record_failure(message_id, channel_id, reason):
@@ -675,15 +655,6 @@ def main():
                 return
 
             message_id = str(message.get("id", ""))
-            author_id = str((message.get("author") or {}).get("id", ""))
-
-            if _on_cooldown(author_id):
-                # Reserved so the sweep does not quietly answer it five minutes
-                # later. A cooldown the safety net undoes is not a cooldown.
-                _reserve(message_id)
-                log.info("User %s is on cooldown, skipping message %s", author_id, message_id)
-                return
-
             if not _reserve(message_id):
                 return
             _executor.submit(_answer_safely, message)
