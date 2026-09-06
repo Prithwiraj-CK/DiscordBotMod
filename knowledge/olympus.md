@@ -52,11 +52,15 @@ trading without them, that is a bug worth escalating immediately.
 ## Results, and which leaders to follow
 
 Plenty of people here do well with it. The wallets channel is where the real
-numbers are:
-https://discord.com/channels/925207817923743794/1509446310552539267
+numbers are. Point people at it by writing exactly this, which Discord turns
+into a clickable channel link:
 
-That link is the answer to all of these, and it always goes in the reply in
-full: is it profitable, does it work, is it worth it, which leaders should i
+<#1509446310552539267>
+
+Write it in that form, never as a discord.com/channels/... URL. This server's
+AutoMod blocks those, so a reply containing one is silently never posted.
+
+That mention is the answer to all of these, and it always goes in the reply: is it profitable, does it work, is it worth it, which leaders should i
 follow, where can i see performance. A channel name with no link is useless to
 someone who cannot find it. Outcomes depend on which leaders someone follows and their own
 settings, so there is no single number and no promise for any one user.

@@ -680,6 +680,21 @@ def _answer(message):
         if "HTTP 404" in detail:
             # Deleted while we were thinking. Nothing to retry.
             log.info("Message %s was gone before we could reply", message_id)
+        elif "code 200000" in detail:
+            # The server's AutoMod refused the message. Deterministic, so the
+            # sweep retrying it twice more just fails twice more. The answer
+            # never reaches the user, which is worth telling someone about.
+            log.warning(
+                "AutoMod blocked the reply to message %s in channel %s. "
+                "The answer was never delivered. Check the server's AutoMod "
+                "rules against what she writes, links especially.",
+                message_id, channel_id,
+            )
+            alert(
+                "AutoMod in <#{}> blocked a reply, so the question went "
+                "unanswered. Usually a link rule.".format(channel_id),
+                key="automod-{}".format(channel_id),
+            )
         elif "HTTP 403" in detail:
             log.warning("No permission to reply in channel %s", channel_id)
             alert(

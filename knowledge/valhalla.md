@@ -1,7 +1,7 @@
 # Valhalla Bot
 
 Official docs: https://valhalla-bot.gitbook.io/valhalla-bot
-Companion site for Olympus: https://olympusx.app
+Olympus web app: https://olympusx.app
 
 ## What it is
 
@@ -16,11 +16,15 @@ DLMM copy trading is still in beta.
 ## Results, and which wallets to follow
 
 Plenty of people here do well with it, and the wallets channel is where the
-real numbers live rather than anyone's word for it:
-https://discord.com/channels/925207817923743794/1484774527610392576
+real numbers live rather than anyone's word for it. Point people at it by
+writing exactly this, which Discord turns into a clickable channel link:
 
-That link is the answer to all of these, and it always goes in the reply in
-full:
+<#1484774527610392576>
+
+Write it in that form, never as a discord.com/channels/... URL. This server's
+AutoMod blocks those, so a reply containing one is silently never posted.
+
+That mention is the answer to all of these, and it always goes in the reply:
 - is it profitable / does it work / is it worth it / any good results
 - which wallets should i follow / any good wallets to copy
 - where can i see performance
