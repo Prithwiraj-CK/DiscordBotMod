@@ -431,7 +431,25 @@ def _call(description, func, *args, **kwargs):
         if status is not None and 200 <= status < 300:
             return response
 
-        raise DiscordCallFailed("{} returned HTTP {}".format(description, status))
+        # Discord explains itself in the body. Without it a 400 is untraceable:
+        # empty content, a deleted parent message and a malformed mention all
+        # look identical from the status code alone.
+        detail = ""
+        try:
+            body = response.json()
+            detail = " - {} (code {})".format(
+                body.get("message", ""), body.get("code", "?")
+            )
+            if body.get("errors"):
+                detail += " {}".format(str(body["errors"])[:200])
+        except Exception:
+            text = getattr(response, "text", "") or ""
+            if text:
+                detail = " - {}".format(text[:200])
+
+        raise DiscordCallFailed(
+            "{} returned HTTP {}{}".format(description, status, detail)
+        )
 
     raise DiscordCallFailed("{} still rate limited after 3 tries".format(description))
 
@@ -621,6 +639,14 @@ def _answer(message):
 
     if IGNORE in answer:
         log.info("Nothing to say to message %s, staying quiet", message_id)
+        return
+
+    # Discord rejects an empty body with a 400, which would then be recorded as
+    # a failure and retried by the sweep, three times, for a message that was
+    # never going to produce anything. Treat it as nothing to say.
+    answer = answer.strip()
+    if not answer:
+        log.info("Model returned nothing for message %s, staying quiet", message_id)
         return
 
     if ESCALATE in answer:
