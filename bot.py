@@ -909,33 +909,45 @@ def _answer_safely(message):
 
 
 def _wants_reply(message):
-    """Whether this message is asking her something.
+    """Whether this message is asking HER something.
 
     In code rather than the prompt, because it decides whether she speaks at
-    all, and the prompt rules have been overridden by context before.
+    all, and prompt rules have been overridden by context before.
 
-    Three ways in: a question mark, being tagged, or someone replying to
-    something she said. Everything else is other people talking.
+    Being tagged, or being replied to, always wins. Otherwise a question mark
+    is enough, UNLESS the message is pointed at somebody else: "@euan how do i
+    fix this?" is Euan's question, and answering it over him is exactly what
+    gives an eager bot away.
     """
-    text = (message.get("content") or "")
+    text = message.get("content") or ""
 
-    if "?" in text or "\uff1f" in text:          # ascii and full-width
-        return True
-
-    # Tagged. The gateway gives a mentions array; the raw form is a fallback
-    # for payloads that arrive without it.
+    tagged_self = False
+    tagged_other = False
     for mention in (message.get("mentions") or []):
         if str(mention.get("id", "")) == _self_id:
-            return True
-    if _self_id and ("<@{}>".format(_self_id) in text or "<@!{}>".format(_self_id) in text):
-        return True
+            tagged_self = True
+        else:
+            tagged_other = True
 
-    # Someone replying directly to one of her messages.
+    # Fallback for payloads that arrive without a mentions array.
+    if _self_id and re.search(r"<@!?{}>".format(_self_id), text):
+        tagged_self = True
+    for mid in re.findall(r"<@!?(\d+)>", text):
+        if mid != _self_id:
+            tagged_other = True
+
     referenced = message.get("referenced_message") or {}
-    if str((referenced.get("author") or {}).get("id", "")) == _self_id:
+    replied_author = str((referenced.get("author") or {}).get("id", "")) if referenced else ""
+
+    # Addressed to her directly: always answer, question mark or not.
+    if tagged_self or (replied_author and replied_author == _self_id):
         return True
 
-    return False
+    # Aimed at somebody else. Their question, their conversation.
+    if tagged_other or (replied_author and replied_author != _self_id):
+        return False
+
+    return "?" in text or "\uff1f" in text
 
 
 def _should_answer(message):
