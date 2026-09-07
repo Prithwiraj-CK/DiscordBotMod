@@ -1053,7 +1053,17 @@ def _sweep_forever():
     must never end the loop.
     """
     interval = SWEEP_MINUTES * 60
-    while not _stop.wait(interval):
+
+    # First pass runs almost immediately rather than after a full interval.
+    # A restart takes a few seconds, and anything asked during those seconds
+    # reaches neither the old gateway nor the new one. The backfill grace
+    # covers it, but waiting five minutes to use that means a question sits
+    # unanswered for five minutes purely because a deploy happened.
+    first = True
+    while True:
+        if _stop.wait(5 if first else interval):
+            return
+        first = False
         try:
             _sweep_once()
         except Exception as exc:
