@@ -121,12 +121,17 @@ _BACKFILL_GRACE = timedelta(seconds=60)
 ANSWER_ATTEMPTS = _env_int("ANSWER_ATTEMPTS", 3)
 
 # Reply pacing. A person reads a message, does something else, and answers a
-# while later. The wait is silent; the typing indicator only appears for the
-# last few seconds, the way it would if she had just started typing. Showing
-# "typing" for the whole wait is worse than not showing it at all.
+# while later. That wait is silent.
+#
+# Typing only appears at the very end, and how long it shows matters as much
+# as the wait. Discord holds the indicator for about ten seconds once raised
+# and clears it when the message lands, so typing duration is really "how long
+# until I send". Nobody types "lmao no" for five seconds. Scaled to the length
+# of the reply and capped hard: a typing dot sitting there is the tell.
 REPLY_DELAY_MIN_SECONDS = _env_float("REPLY_DELAY_MIN_SECONDS", 30)
 REPLY_DELAY_MAX_SECONDS = _env_float("REPLY_DELAY_MAX_SECONDS", 120)
-TYPING_LEAD_SECONDS = _env_float("TYPING_LEAD_SECONDS", 5)
+TYPING_MAX_SECONDS = _env_float("TYPING_MAX_SECONDS", 4)
+TYPING_CHARS_PER_SECOND = max(1.0, _env_float("TYPING_CHARS_PER_SECOND", 40))
 
 # Answers in flight at once. Small on purpose: a user account posting in
 # parallel across channels is exactly what automated-behaviour detection is
@@ -653,6 +658,13 @@ def _escalation_reply():
     return mention + choice
 
 
+def _typing_seconds(text):
+    """How long to show typing before sending. Short, and never fixed."""
+    seconds = len(text or "") / TYPING_CHARS_PER_SECOND
+    seconds = max(0.8, min(seconds, TYPING_MAX_SECONDS))
+    return seconds * random.uniform(0.85, 1.15)
+
+
 def _reply_delay_seconds():
     """How long before she answers. Random, and on a human scale."""
     low = max(0.0, min(REPLY_DELAY_MIN_SECONDS, REPLY_DELAY_MAX_SECONDS))
@@ -845,7 +857,7 @@ def _answer(message):
         # seconds. "Typing" for the whole delay is what made her look like a
         # machine reacting to every message in the channel.
         delay = _reply_delay_seconds()
-        lead = min(TYPING_LEAD_SECONDS, delay)
+        lead = min(_typing_seconds(body), delay)
         if _stop.wait(delay - lead):
             return
         try:
