@@ -120,12 +120,13 @@ _BACKFILL_GRACE = timedelta(seconds=60)
 # How many times we'll try to answer one message before writing it off.
 ANSWER_ATTEMPTS = _env_int("ANSWER_ATTEMPTS", 3)
 
-# Reply pacing. Nothing gives an automated account away faster than a
-# complete, correct answer landing 700ms after the question, so the reply is
-# held back for roughly as long as typing it would take.
-TYPING_CHARS_PER_SECOND = max(1.0, _env_float("TYPING_CHARS_PER_SECOND", 18))
-TYPING_MIN_SECONDS = _env_float("TYPING_MIN_SECONDS", 2)
-TYPING_MAX_SECONDS = _env_float("TYPING_MAX_SECONDS", 9)
+# Reply pacing. A person reads a message, does something else, and answers a
+# while later. The wait is silent; the typing indicator only appears for the
+# last few seconds, the way it would if she had just started typing. Showing
+# "typing" for the whole wait is worse than not showing it at all.
+REPLY_DELAY_MIN_SECONDS = _env_float("REPLY_DELAY_MIN_SECONDS", 30)
+REPLY_DELAY_MAX_SECONDS = _env_float("REPLY_DELAY_MAX_SECONDS", 120)
+TYPING_LEAD_SECONDS = _env_float("TYPING_LEAD_SECONDS", 5)
 
 # Answers in flight at once. Small on purpose: a user account posting in
 # parallel across channels is exactly what automated-behaviour detection is
@@ -319,10 +320,11 @@ Also [[IGNORE]] these, which is where you have gone wrong before:
 - thanks aimed at someone else: "thanks prof", "ty man", "thanks all"
 - anyone talking ABOUT you or the products without asking you anything
 
-A greeting is somebody opening a conversation, so say hi back: "hi", "hey",
-"gm", "yo", "anyone around?" get a short warm reply, the way you would if
-someone walked up to your desk. A thank you aimed at YOU gets a few words
-back. Keep both short and never add a menu of what you can help with.
+You only ever see messages that asked a question, tagged you, or replied to
+something you said, because everything else is filtered out before it reaches
+you. So the bar for [[IGNORE]] here is high: someone went out of their way to
+address you. Use it for the ones that still need nothing back, like a
+sign-off or a thanks meant for someone else, and answer the rest.
 
 ANSWER THE MESSAGE IN FRONT OF YOU
 Reply to what this person just said, not to the topic of the conversation.
@@ -621,11 +623,11 @@ def _escalation_reply():
     return mention + choice
 
 
-def _typing_seconds(text):
-    """How long a person would plausibly take to type this."""
-    seconds = len(text) / TYPING_CHARS_PER_SECOND
-    seconds = max(TYPING_MIN_SECONDS, min(seconds, TYPING_MAX_SECONDS))
-    return seconds * random.uniform(0.8, 1.2)
+def _reply_delay_seconds():
+    """How long before she answers. Random, and on a human scale."""
+    low = max(0.0, min(REPLY_DELAY_MIN_SECONDS, REPLY_DELAY_MAX_SECONDS))
+    high = max(low, REPLY_DELAY_MAX_SECONDS)
+    return random.uniform(low, high)
 
 
 def _normalise(text):
@@ -775,13 +777,19 @@ def _answer(message):
     else:
         body = answer
 
-    # Typing only makes sense where a person is waiting on her.
     if not shadowed:
+        # Wait in silence first, then show typing only for the last few
+        # seconds. "Typing" for the whole delay is what made her look like a
+        # machine reacting to every message in the channel.
+        delay = _reply_delay_seconds()
+        lead = min(TYPING_LEAD_SECONDS, delay)
+        if _stop.wait(delay - lead):
+            return
         try:
             _bot.typingAction(OUTPUT_CHANNEL_ID)
         except Exception:
             pass
-        if _stop.wait(_typing_seconds(body)):
+        if _stop.wait(lead):
             return
 
     try:
@@ -825,6 +833,36 @@ def _answer_safely(message):
         log.exception("Unexpected error answering message %s", message.get("id"))
 
 
+def _wants_reply(message):
+    """Whether this message is asking her something.
+
+    In code rather than the prompt, because it decides whether she speaks at
+    all, and the prompt rules have been overridden by context before.
+
+    Three ways in: a question mark, being tagged, or someone replying to
+    something she said. Everything else is other people talking.
+    """
+    text = (message.get("content") or "")
+
+    if "?" in text or "\uff1f" in text:          # ascii and full-width
+        return True
+
+    # Tagged. The gateway gives a mentions array; the raw form is a fallback
+    # for payloads that arrive without it.
+    for mention in (message.get("mentions") or []):
+        if str(mention.get("id", "")) == _self_id:
+            return True
+    if _self_id and ("<@{}>".format(_self_id) in text or "<@!{}>".format(_self_id) in text):
+        return True
+
+    # Someone replying directly to one of her messages.
+    referenced = message.get("referenced_message") or {}
+    if str((referenced.get("author") or {}).get("id", "")) == _self_id:
+        return True
+
+    return False
+
+
 def _should_answer(message):
     """Filters applied identically on the live path and in the sweep."""
     channel_id = str(message.get("channel_id", ""))
@@ -842,6 +880,8 @@ def _should_answer(message):
     if author.get("bot"):
         return False
     if not (message.get("content") or "").strip():
+        return False
+    if not _wants_reply(message):
         return False
     return True
 
