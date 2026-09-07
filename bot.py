@@ -691,6 +691,32 @@ def _strip_repeat_anchor(turns, text):
     return [t for t in turns if t["role"] != "assistant"], True
 
 
+def _readable(text, message=None):
+    """Turn raw Discord tokens into something the model can read.
+
+    The gateway sends mentions as <@1234567890>, not @Salena. Handing that
+    straight to the model produced replies like "lmao no, that's not me": it
+    was trying to interpret the number. Channel mentions have the same problem.
+    """
+    text = text or ""
+    if _self_id:
+        text = re.sub(r"<@!?{}>".format(_self_id), "@Salena", text)
+
+    names = {}
+    for mention in ((message or {}).get("mentions") or []):
+        mid = str(mention.get("id", ""))
+        if mid and mid != _self_id:
+            names[mid] = mention.get("global_name") or mention.get("username") or "someone"
+
+    def _user(match):
+        return "@" + names.get(match.group(1), "someone")
+
+    text = re.sub(r"<@!?(\d+)>", _user, text)
+    text = re.sub(r"<#(\d+)>", lambda m: "#" + _channel_names.get(m.group(1), "a-channel"), text)
+    text = re.sub(r"<@&\d+>", "@a-role", text)
+    return text
+
+
 def _system_prompt():
     """Rebuilt per question so an edit to knowledge/ is live without a restart."""
     return SYSTEM_PROMPT.format(knowledge=load_knowledge())
@@ -722,6 +748,7 @@ def _recent_context(channel_id, before_id):
         if author.get("bot") and not is_self:
             continue
         name = author.get("global_name") or author.get("username") or "user"
+        content = _readable(content, message)
         turns.append({
             "role": "assistant" if is_self else "user",
             "content": content if is_self else "{}: {}".format(name, content),
@@ -742,8 +769,9 @@ def _answer(message):
 
     try:
         turns = _recent_context(channel_id, message_id)
-        turns, repeated = _strip_repeat_anchor(turns, "{}: {}".format(name, text))
-        turns.append({"role": "user", "content": "{}: {}".format(name, text)})
+        readable = _readable(text, message)
+        turns, repeated = _strip_repeat_anchor(turns, "{}: {}".format(name, readable))
+        turns.append({"role": "user", "content": "{}: {}".format(name, readable)})
 
         prompt = _system_prompt()
         if repeated:
