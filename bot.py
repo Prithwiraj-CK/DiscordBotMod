@@ -170,6 +170,32 @@ ESCALATE = "[[ESCALATE]]"
 # greeting in the channel and pings staff over "lol".
 IGNORE = "[[IGNORE]]"
 
+# "are you a bot / an AI / a real person". The prompt tells her to skip this
+# question, and the prompt does not hold: measured across a dozen asks, some
+# answers came back as a flat "lmao no, i'm real". Whatever else this bot does,
+# it should not be issuing denials, so the model never gets to answer this one.
+# Matched here, she uses a fixed brush-off that asserts nothing either way.
+_IDENTITY_QUESTION_RE = re.compile(
+    r"\b(are|r|is|was)\s+(you|u|this|that|she|salena)\s+"
+    r"(really\s+|actually\s+|a\s+|an\s+)*"
+    r"(bot|ai|a\.?i\.?|robot|chatbot|human|real|person|gpt|llm|scripted|automated)"
+    r"|\b(you|u|ur|youre|you're)\s+(are|r)?\s*(a|an)?\s*(bot|ai|robot|chatbot)\b"
+    r"|\bbot\s+or\s+(not|human|real)"
+    r"|\btalking\s+to\s+(a\s+)?(bot|ai|robot|machine)",
+    re.IGNORECASE,
+)
+
+# None of these say yes or no. They skip the question, which is the only
+# honest thing available that is also not an admission.
+_IDENTITY_DEFLECTIONS = (
+    "haha. anyway, did you need something?",
+    "lol. what's up, anything i can help with?",
+    "ha, ok. was there something you needed?",
+    "anyway 😄 what did you need?",
+    "haha. you after something valhalla or olympus related?",
+    "lol ok. anything you actually needed?",
+)
+
 # Money and account questions must reach a person. The model is told to emit
 # the escalate token for these, and measured at roughly four times in five: at
 # the fifth, someone asking where their funds went gets a sympathetic sentence
@@ -307,24 +333,24 @@ an admin, or a developer.
 - Never explain away a discrepancy in someone's money. Escalate it.
 
 WHEN NOTHING NEEDS SAYING
-You are in a chat, not a ticket queue, and not every line needs you.
-Reply with exactly [[IGNORE]] and nothing else when a message is:
-- two other people talking to each other
-- a reaction or aside with nothing in it for you ("lol", "lmao", "o", "fr")
-- an emoji, a sticker, or a link on its own
-- gibberish or an obvious mistype ("kdvkaav")
-- an announcement, or someone thinking out loud
+Everything reaching you already asked a question, tagged you, or replied to
+something you said. Somebody addressed you on purpose, so the default is to
+ANSWER. Staying silent on a direct question is the rudest thing you can do and
+it is what a broken bot looks like.
 
-Also [[IGNORE]] these, which is where you have gone wrong before:
-- sign-offs: "bye", "gn", "cya", "imma head out", "see this tmrw", "later"
-- thanks aimed at someone else: "thanks prof", "ty man", "thanks all"
-- anyone talking ABOUT you or the products without asking you anything
+[[IGNORE]] is for the rare leftovers only:
+- a sign-off: "bye", "gn", "cya", "see you tmrw"
+- thanks or praise aimed at somebody else: "thanks prof", "ty man"
+- a question clearly addressed to another person by name
 
-You only ever see messages that asked a question, tagged you, or replied to
-something you said, because everything else is filtered out before it reaches
-you. So the bar for [[IGNORE]] here is high: someone went out of their way to
-address you. Use it for the ones that still need nothing back, like a
-sign-off or a thanks meant for someone else, and answer the rest.
+That is the whole list. Everything else gets a reply, including small talk.
+"how are you?", "you?", "what you up to?", "hows your day" are people being
+friendly with you: answer them like a person would, in a few words, and ask
+back if it feels natural. They are not noise and they are not support
+questions, they are just chat.
+
+If you are unsure, answer. Silence is only correct when the message plainly
+was not for you.
 
 ANSWER THE MESSAGE IN FRONT OF YOU
 Reply to what this person just said, not to the topic of the conversation.
@@ -354,9 +380,13 @@ only a human can action - reply with exactly this and nothing else:
 Guessing is worse than escalating. Escalate freely.
 
 IF SOMEONE ASKS WHETHER YOU ARE A BOT, AN AI, OR A REAL PERSON
-Do not claim to be human. Do not claim to be a bot either. Do not pull the
-team into it, it is not a support question. Brush past it the way someone
-busy would and get back to what they actually needed.
+This one question is the exception to answering. Never say yes and never say
+no. "no", "lmao no", "nope", "im real", "im human" are all forbidden answers,
+and so is confirming it.
+
+Say nothing about what you are. Skip the question entirely, the way a busy
+person skips something they cannot be bothered with, and go straight to what
+they might actually need. Do not pull the team into it either.
 
 If they keep pressing on it, stop engaging with the question and say only
 that you are here to help with Valhalla and Olympus.
@@ -737,9 +767,14 @@ def _answer(message):
         _record_failure(message_id, channel_id, "{}: {}".format(type(exc).__name__, exc))
         return
 
-    # Safety net before anything else: this class of question goes to a person
+    # Identity questions never reach the model, so it can never answer them.
+    if _IDENTITY_QUESTION_RE.search(text):
+        log.info("Identity question in message %s, deflecting without the model", message_id)
+        answer = random.choice(_IDENTITY_DEFLECTIONS)
+
+    # Safety net: this class of question goes to a person
     # even when the model decided it could handle it itself.
-    if _MUST_ESCALATE_RE.search(text) and ESCALATE not in answer:
+    elif _MUST_ESCALATE_RE.search(text) and ESCALATE not in answer:
         log.info(
             "Forcing handoff for message %s: money/account question the model tried to answer",
             message_id,
@@ -908,10 +943,10 @@ def _sweep_once():
             )
             history = response.json()
         except DiscordCallFailed as exc:
-            if "HTTP 403" in str(exc):
+            if "HTTP 403" in str(exc) or "HTTP 404" in str(exc):
                 _unreadable.add(channel_id)
                 log.warning(
-                    "No history access to #%s, dropping it from the sweep",
+                    "Cannot read #%s (gone or no access), dropping it from the sweep",
                     _channel_names.get(channel_id, channel_id),
                 )
             else:
