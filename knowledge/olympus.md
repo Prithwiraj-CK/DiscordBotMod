@@ -62,6 +62,47 @@ follow, where can i see performance. A channel name with no link is useless to
 someone who cannot find it. Outcomes depend on which leaders someone follows and their own
 settings, so there is no single number and no promise for any one user.
 
+## Combos
+
+A combo is a **multi-leg parlay**: several market outcomes bundled into one
+YES (or NO) position, built on the Combos page. It is not a basket of separate
+trades. Every leg has to come in for it to pay, which is what makes the odds
+long, and it settles through a different venue to normal orders.
+
+Anyone describing it as "buying several markets at once" has the wrong idea and
+is worth correcting: the all-or-nothing part is the whole point.
+
+## Perps, and perps automation
+
+Perps are leveraged perpetual futures on real-world assets, settled in pUSD,
+with no expiry. Six instruments: SP500, GOLD, WTIOIL, NAS100, SILVER and BTC.
+Leverage caps vary by instrument (SP500 goes to 20x).
+
+**Perps automation** opens perps positions for you from RSI rules. A rule says:
+when the latest closed candle's RSI falls inside my band, open a position with
+my margin and leverage, then arm dollar take-profit and stop-loss. Set them up
+in the Perps Automation tab.
+
+What people get wrong about it:
+
+- **RSI is the only strategy that works.** The tab also shows MACD Crossover,
+  EMA Golden Cross and Bollinger Band Touch. Those are placeholders and are not
+  implemented, so a rule built on them will never fire.
+- **One direction per market.** Several rules on the same instrument are fine,
+  including different timeframes, but they must all be the same direction. A
+  short BTC rule is refused while any long BTC rule exists, because a perps
+  position nets per instrument.
+- **It only uses closed candles**, so it will not fire mid-candle.
+- **Cooldown is the candle interval**, and it survives restarts. A 1h rule
+  fires at most once an hour.
+- **It skips an instrument that already has a position open**, so a rule can
+  look "not working" when it is just waiting for the existing position to close.
+- It is labelled **early beta**, and it moves real collateral.
+
+Explain how it works and what the settings do. Never tell anyone what bands,
+leverage or margin to use, or whether to switch it on: that is a trading
+decision and it is theirs.
+
 ## Key terms
 
 **Leader** - a wallet a follower has chosen to mirror. Also called the target
