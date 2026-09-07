@@ -54,8 +54,8 @@ trading without them, that is a bug worth escalating immediately.
 Plenty of people here do well with it. The **olympus wallets** channel in this server is where the real numbers are.
 
 Name it in plain words. Do NOT write it as a <#id> channel mention and do NOT
-write a discord.com/channels/... URL: this account cannot see that channel, so
-Discord blocks both forms and the whole reply is silently never posted.
+write a discord.com/channels/... URL. This server's AutoMod blocks both, and a
+reply containing one is silently never posted.
 
 That channel is the answer to all of these: is it profitable, does it work, is it worth it, which leaders should i
 follow, where can i see performance. A channel name with no link is useless to
