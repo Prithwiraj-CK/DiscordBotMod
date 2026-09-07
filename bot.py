@@ -908,6 +908,19 @@ def _answer_safely(message):
         log.exception("Unexpected error answering message %s", message.get("id"))
 
 
+# A URL's query string is full of question marks. "look at this
+# x.com/status/123?s=46" is not a question, and treating it as one had her
+# replying to every link anyone dropped. Links, and fenced code, are removed
+# before looking for one.
+_URL_RE = re.compile(r"https?://\S+|www\.\S+", re.IGNORECASE)
+_CODE_RE = re.compile(r"```.*?```|`[^`]*`", re.DOTALL)
+
+
+def _asks_something(text):
+    stripped = _URL_RE.sub(" ", _CODE_RE.sub(" ", text or ""))
+    return "?" in stripped or "\uff1f" in stripped
+
+
 def _wants_reply(message):
     """Whether this message is asking HER something.
 
@@ -947,7 +960,7 @@ def _wants_reply(message):
     if tagged_other or (replied_author and replied_author != _self_id):
         return False
 
-    return "?" in text or "\uff1f" in text
+    return _asks_something(text)
 
 
 def _should_answer(message):
