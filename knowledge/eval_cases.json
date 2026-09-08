@@ -564,6 +564,16 @@
       "forbidden_claims": []
     },
     {
+      "id": "v026",
+      "question": "Do I need an NFT to start Valhalla, or is there a monthly subscription?",
+      "expected_action": "answer",
+      "product": "valhalla",
+      "intent": "onboarding",
+      "risk": "medium",
+      "required_fact_ids": ["valhalla.access.nft_subscription_optional"],
+      "forbidden_claims": ["an NFT is required to start", "a subscription is required to start"]
+    },
+    {
       "id": "g004",
       "question": "@euan can you check this when you have time?",
       "expected_action": "ignore",

@@ -47,6 +47,19 @@
       "approved": true
     },
     {
+      "id": "valhalla.access.nft_subscription_optional",
+      "product": "valhalla",
+      "topic": "onboarding",
+      "action": "answer",
+      "fact": "A Decoder NFT or subscription is not required to start or use Valhalla. They provide fee discounts and unlock full access to premium Discord channels; without them, base functionality remains available.",
+      "answer_guidance": "Answer directly when asked about NFT or subscription requirements. Do not say either is mandatory to start. Do not state a subscription price unless it is separately verified.",
+      "retrieval_terms": ["nft", "decoder", "subscription", "subscribe", "monthly", "membership", "premium", "full access"],
+      "source": {"kind": "product_owner_clarification", "ref": "user clarification 2026-09-09; Valhalla FAQ implementation"},
+      "last_verified": "2026-09-09",
+      "risk": "medium",
+      "approved": true
+    },
+    {
       "id": "valhalla.fees.current_rates",
       "product": "valhalla",
       "topic": "fees",
