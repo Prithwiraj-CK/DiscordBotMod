@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import logging
 import json
+import re
 from pathlib import Path
 
 log = logging.getLogger("support-bot.knowledge")
@@ -21,6 +22,74 @@ APPROVED_FACTS_PATH = KNOWLEDGE_DIR / "approved_facts.json"
 
 _cached_text = ""
 _cached_fingerprint: tuple | None = None
+
+
+def load_approved_facts() -> list[dict]:
+    """Return approved structured facts for routing and evidence selection."""
+    if not APPROVED_FACTS_PATH.exists():
+        return []
+    try:
+        payload = json.loads(APPROVED_FACTS_PATH.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        log.error("Could not parse approved fact index %s", APPROVED_FACTS_PATH.name)
+        return []
+    facts = payload.get("facts", []) if isinstance(payload, dict) else []
+    return [fact for fact in facts if isinstance(fact, dict) and fact.get("approved") is True]
+
+
+_FACT_TOKEN_RE = re.compile(r"[a-z0-9_]+")
+_FACT_STOPWORDS = {
+    "a", "an", "and", "are", "can", "do", "does", "for", "from", "how",
+    "i", "in", "is", "it", "my", "of", "on", "or", "the", "this", "to",
+    "what", "when", "where", "why", "with", "you", "your",
+}
+
+
+def _fact_tokens(text: str) -> set[str]:
+    return {
+        token for token in _FACT_TOKEN_RE.findall((text or "").lower())
+        if len(token) > 2 and token not in _FACT_STOPWORDS
+    }
+
+
+def retrieve_facts(query: str, product: str | None = None,
+                   intent: str | None = None, limit: int = 6) -> list[dict]:
+    """Retrieve a small, deterministic evidence set from approved facts.
+
+    Product and intent are supplied by the classifier. Lexical overlap keeps
+    this useful even when the classifier is uncertain, while the approved
+    index remains the only source eligible for factual answers.
+    """
+    query_tokens = _fact_tokens(query)
+    all_facts = load_approved_facts()
+    product_facts = [
+        fact for fact in all_facts
+        if not product or product in ("unknown", "generic") or fact.get("product") == product
+    ]
+    topic_facts = [
+        fact for fact in product_facts
+        if intent and intent != "unknown" and fact.get("topic") == intent
+    ]
+    candidates = topic_facts or product_facts
+    scored = []
+    for fact in candidates:
+        searchable = " ".join(
+            str(fact.get(field, ""))
+            for field in ("id", "product", "topic", "fact", "answer_guidance")
+        )
+        fact_tokens = _fact_tokens(searchable)
+        overlap = len(query_tokens & fact_tokens)
+        score = overlap
+        if intent and intent != "unknown" and fact.get("topic") == intent:
+            score += 4
+        if fact.get("action") == "escalate" and any(
+            marker in query_tokens for marker in {"my", "missing", "wrong", "failed", "stuck", "discrepancy"}
+        ):
+            score += 1
+        if score > 0:
+            scored.append((score, str(fact.get("id", "")), fact))
+    scored.sort(key=lambda item: (-item[0], item[1]))
+    return [fact for _, _, fact in scored[:max(1, limit)]]
 
 
 def _fingerprint() -> tuple:

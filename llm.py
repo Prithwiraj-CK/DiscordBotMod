@@ -1,6 +1,6 @@
 """Single choke point for every model call.
 
-Everything else in the bot goes through ask_llm() and does not know or care
+Every model call in the bot goes through this module and does not know or care
 which provider is behind it. Swapping OpenAI -> Claude means editing this file
 and nothing else.
 
@@ -14,6 +14,7 @@ before it calls load_dotenv(), so anything read at import would see an empty
 """
 
 import logging
+import json
 import os
 import random
 import time
@@ -131,6 +132,68 @@ def ask_llm(system_prompt, messages):
 
     raise LLMUnavailable(
         "Model unreachable after {} attempts: {}: {}".format(
+            attempts, type(last_error).__name__, last_error
+        )
+    ) from last_error
+
+
+def ask_json(system_prompt, messages, schema, name="structured_response", temperature=0.2):
+    """Return a model response constrained by an OpenAI JSON schema.
+
+    Routing and evidence selection use this path so the caller can reject an
+    unsupported action or citation before anything is posted. It shares the
+    same retry and authentication behavior as ask_llm().
+    """
+    attempts = _max_attempts()
+    last_error = None
+    response_format = {
+        "type": "json_schema",
+        "json_schema": {
+            "name": name,
+            "strict": True,
+            "schema": schema,
+        },
+    }
+
+    for attempt in range(1, attempts + 1):
+        try:
+            response = _get_client().chat.completions.create(
+                model=os.getenv("OPENAI_MODEL", "gpt-4o-mini"),
+                messages=[{"role": "system", "content": system_prompt}, *messages],
+                max_tokens=500,
+                temperature=temperature,
+                response_format=response_format,
+            )
+            content = (response.choices[0].message.content or "").strip()
+            if not content:
+                raise LLMUnavailable("OpenAI returned an empty structured response")
+            try:
+                value = json.loads(content)
+            except ValueError as exc:
+                raise LLMUnavailable("OpenAI returned invalid structured JSON") from exc
+            if not isinstance(value, dict):
+                raise LLMUnavailable("OpenAI structured response was not an object")
+            return value
+
+        except openai.AuthenticationError as exc:
+            raise LLMUnavailable("OpenAI rejected the API key: {}".format(exc)) from exc
+        except openai.BadRequestError as exc:
+            raise LLMUnavailable("OpenAI rejected the structured request: {}".format(exc)) from exc
+        except LLMUnavailable:
+            raise
+        except _RETRYABLE as exc:
+            last_error = exc
+            if attempt == attempts:
+                break
+            delay = min(2 ** (attempt - 1), 8) + random.uniform(0, 0.5)
+            log.warning(
+                "Structured model call failed (attempt %s/%s): %s. Retrying in %.1fs",
+                attempt, attempts, type(exc).__name__, delay,
+            )
+            time.sleep(delay)
+
+    raise LLMUnavailable(
+        "Structured model unreachable after {} attempts: {}: {}".format(
             attempts, type(last_error).__name__, last_error
         )
     ) from last_error

@@ -26,6 +26,7 @@ that silently disappears is invisible to everyone including us.
 """
 
 import logging
+import json
 import os
 import random
 import re
@@ -40,8 +41,8 @@ import requests
 from dotenv import load_dotenv
 
 from alerts import alert
-from knowledge import load_knowledge
-from llm import ask_llm
+from knowledge import load_knowledge, retrieve_facts
+from llm import ask_json
 
 load_dotenv()
 
@@ -416,6 +417,72 @@ REFERENCE MATERIAL
 """
 
 
+# The router and drafter are deliberately separate from the legacy persona
+# prompt above. They make the decision from the current message first, then
+# receive only the evidence selected for that message. No staff confirmation
+# is part of the path: the model decides autonomously, while SHADOW_MODE
+# controls where the resulting proposal is posted.
+ROUTE_SCHEMA = {
+    "type": "object",
+    "additionalProperties": False,
+    "properties": {
+        "action": {"type": "string", "enum": ["answer", "clarify", "escalate", "ignore"]},
+        "product": {"type": "string", "enum": ["valhalla", "olympus", "generic", "unknown"]},
+        "intent": {"type": "string", "enum": [
+            "onboarding", "fees", "copy_trading", "settings", "risk_controls",
+            "performance", "wallets", "orders", "sports", "leverage", "security",
+            "support_triage", "overview", "social", "underspecified", "unknown",
+        ]},
+        "risk": {"type": "string", "enum": ["low", "medium", "high", "critical"]},
+        "confidence": {"type": "number", "minimum": 0, "maximum": 1},
+        "missing_information": {"type": "array", "items": {"type": "string"}},
+    },
+    "required": ["action", "product", "intent", "risk", "confidence", "missing_information"],
+}
+
+DRAFT_SCHEMA = {
+    "type": "object",
+    "additionalProperties": False,
+    "properties": {
+        "action": {"type": "string", "enum": ["answer", "clarify", "escalate", "ignore"]},
+        "evidence_ids": {"type": "array", "items": {"type": "string"}},
+        "missing_information": {"type": "array", "items": {"type": "string"}},
+        "draft_answer": {"type": "string", "maxLength": 1800},
+    },
+    "required": ["action", "evidence_ids", "missing_information", "draft_answer"],
+}
+
+ROUTER_SYSTEM = """Classify the current Discord message for an autonomous product-support bot.
+Choose exactly one action:
+- answer: the approved knowledge clearly answers a general product question
+- clarify: one important detail is missing and a short question can obtain it
+- escalate: account-specific money, wallet, security, trade discrepancy, or unsupported behavior
+- ignore: a sign-off, thanks to another person, or a question explicitly addressed to staff
+
+Use product=generic for social or unrelated messages. Never choose answer for a
+specific balance, PnL, redemption, withdrawal, missing/duplicated/incorrect
+trade, private key, seed phrase, or suspected compromise. Do not use the
+conversation history to invent facts. This is an autonomous decision; do not
+ask a human to approve the action.
+"""
+
+DRAFTER_SYSTEM = """Write the final autonomous support response using only the approved evidence below.
+Return the action that should be used for this response and cite every factual
+claim with one or more evidence_ids. If the evidence does not support an
+answer, choose escalate. For clarify, ask exactly one short question and do
+not guess. For ignore, leave draft_answer empty.
+
+Keep it concise, warm, and direct. Do not claim to see a user's account,
+balance, trade, logs, or funds. Never request a private key, seed phrase,
+password, PIN, or API key. Never promise profit, safety, recovery, or a fix.
+Do not claim to be human or deny being a bot. If a fee question has an approved
+link, include the link. A human handoff is an autonomous safety decision, not a
+request for approval.
+
+APPROVED EVIDENCE
+"""
+
+
 # ---------------------------------------------------------------------------
 # State. Touched from the gateway thread, the sweep thread and the workers,
 # so every read-modify-write goes through _state_lock.
@@ -749,6 +816,85 @@ def _system_prompt():
     return SYSTEM_PROMPT.format(knowledge=load_knowledge())
 
 
+_SECURITY_RE = re.compile(
+    r"\b(private\s+key|seed\s+phrase|mnemonic|passcode|api\s+key|wallet\s+"
+    r"(compromised|hacked|stolen))\b",
+    re.IGNORECASE,
+)
+
+
+def _evidence_text(facts):
+    blocks = []
+    for fact in facts:
+        lines = [
+            "[{}]".format(fact.get("id", "unknown")),
+            "Fact: {}".format(fact.get("fact", "")),
+        ]
+        if fact.get("answer_guidance"):
+            lines.append("Guidance: {}".format(fact["answer_guidance"]))
+        if fact.get("links"):
+            lines.append("Links: {}".format(", ".join(fact["links"])))
+        blocks.append("\n".join(lines))
+    return "\n\n".join(blocks) or "(no approved evidence matched)"
+
+
+def _autonomous_response(query, turns):
+    """Classify, retrieve, decide, validate, and draft without staff approval."""
+    route = ask_json(
+        ROUTER_SYSTEM,
+        [{"role": "user", "content": query}],
+        ROUTE_SCHEMA,
+        name="support_route",
+        temperature=0.0,
+    )
+    action = route.get("action")
+    product = route.get("product")
+    intent = route.get("intent")
+    facts = retrieve_facts(query, product=product, intent=intent, limit=6)
+    fact_ids = {str(fact.get("id", "")) for fact in facts}
+    log.info(
+        "Autonomous route action=%s product=%s intent=%s risk=%s confidence=%.2f evidence=%s",
+        action, product, intent, route.get("risk"), route.get("confidence", 0), sorted(fact_ids),
+    )
+
+    # Deterministic safety gates override a model choice for high-risk text.
+    if _MUST_ESCALATE_RE.search(query) or _SECURITY_RE.search(query):
+        return ESCALATE
+    if action == "ignore":
+        return IGNORE
+    if action == "escalate":
+        return ESCALATE
+    if action not in {"answer", "clarify"}:
+        return ESCALATE
+    if action == "answer" and not facts and intent not in {"social", "unknown"}:
+        return ESCALATE
+
+    draft_prompt = DRAFTER_SYSTEM + _evidence_text(facts)
+    draft = ask_json(
+        draft_prompt,
+        turns,
+        DRAFT_SCHEMA,
+        name="support_draft",
+        temperature=0.2,
+    )
+    draft_action = draft.get("action")
+    used_ids = {str(value) for value in draft.get("evidence_ids", [])}
+    if draft_action not in {"answer", "clarify"}:
+        return ESCALATE if draft_action == "escalate" else IGNORE
+    if not used_ids.issubset(fact_ids):
+        log.warning("Rejected draft with evidence outside retrieval set: %s", used_ids - fact_ids)
+        return ESCALATE
+    if draft_action == "answer" and not used_ids and intent not in {"social", "unknown"}:
+        return ESCALATE
+    answer = (draft.get("draft_answer") or "").strip()
+    if not answer:
+        return IGNORE if draft_action == "ignore" else ESCALATE
+    if draft_action == "clarify" and len(answer) > 1000:
+        log.warning("Rejected oversized clarification")
+        return ESCALATE
+    return answer
+
+
 def _recent_context(channel_id, before_id):
     """Last few messages in the channel, oldest first, as model turns."""
     response = _call(
@@ -800,23 +946,15 @@ def _answer(message):
         turns, repeated = _strip_repeat_anchor(turns, "{}: {}".format(name, readable))
         turns.append({"role": "user", "content": "{}: {}".format(name, readable)})
 
-        prompt = _system_prompt()
         if repeated:
             log.info("Message %s repeats an earlier question, answering fresh", message_id)
-            prompt += (
-                "\n\nTHEY HAVE ASKED THIS BEFORE AND ARE ASKING AGAIN.\n"
-                "Your earlier answers have been removed from the conversation above "
-                "on purpose. Whatever you said last time did not land, so do not "
-                "reconstruct it. Answer from scratch: lead with the single most "
-                "concrete thing you have, a link above all, and keep it short."
-            )
 
         try:
             _bot.typingAction(channel_id)   # best effort, never worth failing over
         except Exception:
             pass
 
-        answer = ask_llm(prompt, turns)
+        answer = _autonomous_response(readable, turns)
     except Exception as exc:
         log.exception("Failed to answer message %s", message_id)
         _record_failure(message_id, channel_id, "{}: {}".format(type(exc).__name__, exc))

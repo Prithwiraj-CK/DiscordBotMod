@@ -106,6 +106,31 @@
       "approved": true
     },
     {
+      "id": "valhalla.copy_trade.skip_reasons",
+      "product": "valhalla",
+      "topic": "copy_trading",
+      "action": "escalate",
+      "fact": "A missed or differing Valhalla copy can involve skipped positions, timing, filters, liquidity, or execution state; the bot cannot identify the cause from a message alone.",
+      "answer_guidance": "Ask for the safe webhook or position context and route a specific discrepancy to a human; never invent a cause.",
+      "source": {"kind": "approved_staff_example", "ref": "older Valhalla support replies reviewed 2026-09-08"},
+      "last_verified": "2026-09-08",
+      "risk": "critical",
+      "approved": true
+    },
+    {
+      "id": "valhalla.onboarding.website",
+      "product": "valhalla",
+      "topic": "onboarding",
+      "action": "answer",
+      "fact": "Valhalla can be started from the website at https://valhalla-bot.app/ as an alternative to the Discord command flow.",
+      "answer_guidance": "Point users to the official site or /valhalla start; do not ask for wallet keys or credentials.",
+      "source": {"kind": "approved_staff_example", "ref": "older onboarding replies and inspected screenshots 2026-09-08"},
+      "last_verified": "2026-09-08",
+      "risk": "low",
+      "links": ["https://valhalla-bot.app/"],
+      "approved": true
+    },
+    {
       "id": "valhalla.copy_trade.ratio",
       "product": "valhalla",
       "topic": "settings",
@@ -202,6 +227,30 @@
       "approved": true
     },
     {
+      "id": "olympus.wallets.gas_model",
+      "product": "olympus",
+      "topic": "wallets",
+      "action": "answer",
+      "fact": "Olympus-created Deposit Wallets are gasless for supported trading flows, while legacy Safe or EOA setups can have different gas requirements; imported wallets must be checked by wallet type.",
+      "answer_guidance": "Explain the distinction without promising that a particular user's wallet is gasless; ask which wallet type or request safe account context when necessary.",
+      "source": {"kind": "approved_staff_example", "ref": "older Olympus wallet support replies and inspected screenshots 2026-09-08"},
+      "last_verified": "2026-09-08",
+      "risk": "high",
+      "approved": true
+    },
+    {
+      "id": "olympus.wallets.address_roles",
+      "product": "olympus",
+      "topic": "wallets",
+      "action": "answer",
+      "fact": "An Olympus account can show separate signing and trading addresses; the signing address signs transactions and the trading address holds trading funds and positions.",
+      "answer_guidance": "Explain the roles briefly. If the displayed addresses or funds do not match the expected account, route it to a human.",
+      "source": {"kind": "runtime_code", "ref": "olympus-main 5 wallet/account flow"},
+      "last_verified": "2026-09-08",
+      "risk": "high",
+      "approved": true
+    },
+    {
       "id": "olympus.copy_trade.behavior",
       "product": "olympus",
       "topic": "copy_trading",
@@ -223,6 +272,30 @@
       "source": {"kind": "official_product_docs", "ref": "https://www.olympusx.app/docs/08-faq"},
       "last_verified": "2026-09-08",
       "risk": "high",
+      "approved": true
+    },
+    {
+      "id": "olympus.orders.statuses",
+      "product": "olympus",
+      "topic": "orders",
+      "action": "answer",
+      "fact": "In Olympus order status, Copied indicates a fill, Limit Placed indicates an order waiting for fill, and Partial Fill indicates that only part of the order filled.",
+      "answer_guidance": "Explain status labels without claiming a specific user's order filled; account-specific discrepancies require human review.",
+      "source": {"kind": "approved_staff_example", "ref": "older Olympus copy-trading replies 2026-09-08"},
+      "last_verified": "2026-09-08",
+      "risk": "medium",
+      "approved": true
+    },
+    {
+      "id": "olympus.copy_trade.execution_discrepancy",
+      "product": "olympus",
+      "topic": "copy_trading",
+      "action": "escalate",
+      "fact": "Unexpected leftover shares, slippage, skipped sells, failed copies, or mismatches between a leader and follower require investigation with the relevant webhook, order, or account context.",
+      "answer_guidance": "Ask for safe screenshots, order IDs, market links, or webhook details; do not promise a root cause or outcome.",
+      "source": {"kind": "approved_staff_example", "ref": "older Olympus ticket and holder-chat replies 2026-09-08"},
+      "last_verified": "2026-09-08",
+      "risk": "critical",
       "approved": true
     },
     {

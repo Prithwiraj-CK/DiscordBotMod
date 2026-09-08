@@ -71,7 +71,9 @@ their provenance, risk, and handling guidance. The Markdown one-pagers are
 supplemental notes. Product-owner clarifications, runtime behavior, and the
 official product documentation take precedence over older notes or examples.
 The evaluator checks schema, duplicate IDs, evidence references, and obvious
-secret-shaped content; it does not call Discord or OpenAI.
+secret-shaped content; it does not call Discord or OpenAI. The current
+regression set contains 59 cases. Routing and posting are autonomous; staff
+approval is not required before the bot makes a shadow proposal.
 
 ## How it works
 
@@ -79,8 +81,10 @@ secret-shaped content; it does not call Discord or OpenAI.
 message in an allowed channel
   → gateway event (discum), dispatched to a worker thread
   → last N messages pulled for context
-  → system prompt (rules + one-pagers) + conversation → model
-  → shadow proposal in #bot-test, or [[ESCALATE]] → human handoff proposal
+  → structured classifier chooses product, intent, risk and action
+  → retrieve only matching approved facts
+  → structured drafter cites evidence and validates its action
+  → shadow proposal in #bot-test, or autonomous handoff proposal
 ```
 
 A 5 minute sweep runs alongside as a safety net for anything the gateway
