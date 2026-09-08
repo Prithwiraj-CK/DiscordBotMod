@@ -1,7 +1,9 @@
 """AI support bot for the project Discord, running on a user account.
 
-Watches a fixed set of channels, answers questions from the one-pagers in
-knowledge/, and hands off to a human when it doesn't know.
+Watches a fixed set of channels, drafts answers from the one-pagers in
+knowledge/, and hands off to a human when it doesn't know. In shadow mode,
+every draft is posted to the test channel for review instead of to the source
+conversation.
 
 This connects as a USER account (discum + a user token), not a bot account.
 Automating a user account is against Discord's Terms of Service and the usual
@@ -137,6 +139,11 @@ TYPING_CHARS_PER_SECOND = max(1.0, _env_float("TYPING_CHARS_PER_SECOND", 40))
 # parallel across channels is exactly what automated-behaviour detection is
 # looking for.
 WORKER_THREADS = max(1, _env_int("WORKER_THREADS", 2))
+
+# Shadow mode is the safe default. Every model result is posted as a proposal
+# in OUTPUT_CHANNEL_ID, including questions that originated in that channel.
+# Live replies require an explicit SHADOW_MODE=false in the environment.
+SHADOW_MODE = os.getenv("SHADOW_MODE", "true").strip().lower() in ("1", "true", "yes", "on")
 
 # ---------------------------------------------------------------------------
 # Where she reads, and the one place she writes.
@@ -846,13 +853,15 @@ def _answer(message):
 
     answer = answer[:2000]
 
-    shadowed = channel_id != OUTPUT_CHANNEL_ID
+    shadowed = SHADOW_MODE
     if shadowed:
-        # Her answer is a PROPOSAL, shown in the test channel next to the
-        # question, never sent to the person who asked.
+        # A PROPOSAL is always shown in the test channel next to the question,
+        # never sent to the person who asked. This also applies to questions
+        # typed directly in #bot-test, so that channel cannot accidentally
+        # become a live-reply channel.
         where = _channel_names.get(channel_id, channel_id)
         body = (
-            "**#{}** \u00b7 {}\n"
+            "**shadow proposal** \u00b7 #{} \u00b7 {}\n"
             "> {}\n\n"
             "{}"
         ).format(where, name, text[:400].replace("\n", "\n> "), answer)
@@ -1172,8 +1181,9 @@ def main():
 
     ALLOWED_CHANNELS, _channel_names = _resolve_watched()
     log.info(
-        "Reading %d channel(s); posting ONLY to #%s (%s)",
+        "Reading %d channel(s); %s ONLY to #%s (%s)",
         len(ALLOWED_CHANNELS),
+        "shadow proposals" if SHADOW_MODE else "live replies",
         _channel_names.get(OUTPUT_CHANNEL_ID, "bot-test"),
         OUTPUT_CHANNEL_ID,
     )

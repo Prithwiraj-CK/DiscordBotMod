@@ -43,8 +43,8 @@ can promise what any one person will make.
 
 ## Getting started
 
-1. `/valhalla start` - creates the wallet and sets up the bot profile. Anyone
-   can run it; no referral code is needed.
+1. `/valhalla start` - creates the wallet and sets up the bot profile. A
+   referral code is not required.
 2. `/valhalla export_keys` - exports the wallet keys. **Set a PIN here.** The
    PIN is what stops anyone withdrawing even if the Discord account is
    compromised.
@@ -82,6 +82,9 @@ Risk controls worth knowing: SOL-only mode, stop-loss limits, one position per
 token, token age and market cap filters, and position caps.
 
 ## Fees
+
+For a fee question, link the official fees FAQ:
+https://valhalla-bot.gitbook.io/valhalla-bot/valhalla-faq
 
 - **0.015%** of position size when the bot opens a position, charged at most
   once per hour per token

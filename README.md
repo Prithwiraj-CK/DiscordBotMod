@@ -1,7 +1,8 @@
 # Discord AI support bot
 
-Answers user questions in specific channels from a set of project one-pagers,
-and hands off to a human when it doesn't know.
+Drafts answers to user questions from a set of project one-pagers, posts them
+to `#bot-test` in shadow mode for staff review, and hands off to a human when
+it doesn't know.
 
 ## Setup
 
@@ -35,9 +36,14 @@ support channel → **Copy Channel ID** and put them in `ALLOWED_CHANNEL_IDS`,
 comma-separated. Right-click the staff role → **Copy Role ID** for
 `STAFF_ROLE_ID`.
 
-The bot answers **only** in the listed channels. Empty list = answers nowhere.
+The bot reads **only** in the listed channels. Empty list = answers nowhere.
 The account must already be able to see and post in each one; there are no
 permissions to grant, it just needs to be a member.
+
+`SHADOW_MODE=true` is the safe default. Every proposal, including one for a
+question typed in `#bot-test`, is posted only in `#bot-test`; it is never sent
+as a reply in the source channel. Set `SHADOW_MODE=false` only for a deliberate
+live test after migrating to an official Discord bot account.
 
 ### 3. Add knowledge
 
@@ -49,6 +55,24 @@ Drop `valhalla.md` and `olympus.md` into `knowledge/`. See `knowledge/README.md`
 python bot.py
 ```
 
+### 5. Validate the knowledge corpus
+
+The approved source-of-truth index and anonymized regression cases can be
+checked offline before changing live replies:
+
+```bash
+python evaluate.py
+python evaluate.py --list
+python evaluate.py --answers answers.json
+```
+
+`knowledge/approved_facts.json` contains the facts that may be used as answers,
+their provenance, risk, and handling guidance. The Markdown one-pagers are
+supplemental notes. Product-owner clarifications, runtime behavior, and the
+official product documentation take precedence over older notes or examples.
+The evaluator checks schema, duplicate IDs, evidence references, and obvious
+secret-shaped content; it does not call Discord or OpenAI.
+
 ## How it works
 
 ```
@@ -56,7 +80,7 @@ message in an allowed channel
   → gateway event (discum), dispatched to a worker thread
   → last N messages pulled for context
   → system prompt (rules + one-pagers) + conversation → model
-  → answer, or [[ESCALATE]] → pings staff role instead
+  → shadow proposal in #bot-test, or [[ESCALATE]] → human handoff proposal
 ```
 
 A 5 minute sweep runs alongside as a safety net for anything the gateway
@@ -114,6 +138,10 @@ invisible to everyone including us.
   message saying which.
 - **Knowledge is hot.** Editing a file in `knowledge/` takes effect on the next
   question, no restart.
+- **The current runtime is still a test harness.** It authenticates as a normal
+  Discord user account, which Discord prohibits automating. Keep it in a
+  private test channel until it is migrated to an official Discord bot account
+  and the structured routing/evaluation gate is in place.
 
 ## Next
 

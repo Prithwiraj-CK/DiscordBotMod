@@ -1,5 +1,16 @@
 # knowledge/
 
+## Source of truth
+
+`approved_facts.json` is the curated, source-tagged fact index. It is rendered
+first and marked authoritative in the model context. Each fact has a source,
+verification date, risk level, and intended action (`answer` or `escalate`).
+Product-owner clarifications take precedence over stale docs.
+
+The product `.md` files remain supplemental notes while the index is expanded.
+If a note conflicts with the approved index, the index wins. Do not add raw
+Discord history, secrets, wallet keys, user exports, or database dumps here.
+
 One `.md` per project. `valhalla.md` and `olympus.md` go here.
 
 Every file in this folder is concatenated into the system prompt on every

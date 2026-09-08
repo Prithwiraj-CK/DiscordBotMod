@@ -1,0 +1,267 @@
+{
+  "schema_version": 1,
+  "last_verified": "2026-09-08",
+  "description": "Anonymized regression cases distilled from reviewed support conversations and approved product facts.",
+  "cases": [
+    {
+      "id": "v001",
+      "question": "Do I need a referral code to start Valhalla?",
+      "expected_action": "answer",
+      "product": "valhalla",
+      "intent": "onboarding",
+      "risk": "low",
+      "required_fact_ids": ["valhalla.onboarding.referral_not_required"],
+      "forbidden_claims": ["referral code is required", "referral code required"]
+    },
+    {
+      "id": "v002",
+      "question": "How do I get started with Valhalla?",
+      "expected_action": "answer",
+      "product": "valhalla",
+      "intent": "onboarding",
+      "risk": "low",
+      "required_fact_ids": ["valhalla.onboarding.commands"],
+      "forbidden_claims": []
+    },
+    {
+      "id": "v003",
+      "question": "How much are the Valhalla fees?",
+      "expected_action": "answer",
+      "product": "valhalla",
+      "intent": "fees",
+      "risk": "medium",
+      "required_fact_ids": ["valhalla.fees.link"],
+      "forbidden_claims": ["there is no fee", "free to use"]
+    },
+    {
+      "id": "v004",
+      "question": "What are the exact Valhalla open and claim fees?",
+      "expected_action": "answer",
+      "product": "valhalla",
+      "intent": "fees",
+      "risk": "high",
+      "required_fact_ids": ["valhalla.fees.current_rates", "valhalla.fees.link"],
+      "forbidden_claims": ["0.15% open fee", "3% trading fee"]
+    },
+    {
+      "id": "v005",
+      "question": "Can Valhalla guarantee that I will make money?",
+      "expected_action": "answer",
+      "product": "valhalla",
+      "intent": "performance",
+      "risk": "high",
+      "required_fact_ids": ["valhalla.performance.no_guarantee"],
+      "forbidden_claims": ["guaranteed profit", "you will make money", "risk-free"]
+    },
+    {
+      "id": "v006",
+      "question": "What does the copy ratio do?",
+      "expected_action": "answer",
+      "product": "valhalla",
+      "intent": "settings",
+      "risk": "high",
+      "required_fact_ids": ["valhalla.copy_trade.ratio"],
+      "forbidden_claims": ["this ratio guarantees profit"]
+    },
+    {
+      "id": "v007",
+      "question": "Why did a token get skipped when I use SOL only?",
+      "expected_action": "answer",
+      "product": "valhalla",
+      "intent": "settings",
+      "risk": "high",
+      "required_fact_ids": ["valhalla.settings.entry_mode"],
+      "forbidden_claims": ["SOL only never skips trades"]
+    },
+    {
+      "id": "v008",
+      "question": "Why is a low Jupiter score restricted to Pumpfun and StonkFun?",
+      "expected_action": "answer",
+      "product": "valhalla",
+      "intent": "risk_controls",
+      "risk": "high",
+      "required_fact_ids": ["valhalla.settings.jup_safety"],
+      "forbidden_claims": ["turn off the safety rail", "the safety rail guarantees safety"]
+    },
+    {
+      "id": "v009",
+      "question": "Is DAMM v2 copying stable now?",
+      "expected_action": "answer",
+      "product": "valhalla",
+      "intent": "copy_trading",
+      "risk": "high",
+      "required_fact_ids": ["valhalla.copy_trade.damm_beta"],
+      "forbidden_claims": ["fully stable", "bug-free", "guaranteed to work"]
+    },
+    {
+      "id": "v010",
+      "question": "My Valhalla copy is missing or duplicated. Can you check it?",
+      "expected_action": "escalate",
+      "product": "valhalla",
+      "intent": "support_triage",
+      "risk": "critical",
+      "required_fact_ids": ["valhalla.account_specific.escalate"],
+      "forbidden_claims": ["it definitely copied", "it definitely did not copy"]
+    },
+    {
+      "id": "v011",
+      "question": "I lost access to my wallet and need my private key recovered.",
+      "expected_action": "escalate",
+      "product": "valhalla",
+      "intent": "security",
+      "risk": "critical",
+      "required_fact_ids": ["valhalla.security.credentials"],
+      "forbidden_claims": ["send me your private key", "send your seed phrase"]
+    },
+    {
+      "id": "v012",
+      "question": "Which setting should I use to make the most profit?",
+      "expected_action": "clarify",
+      "product": "valhalla",
+      "intent": "settings",
+      "risk": "high",
+      "required_fact_ids": [],
+      "forbidden_claims": ["use this setting to make the most profit", "guaranteed profit"]
+    },
+    {
+      "id": "o001",
+      "question": "How do I sign in to Olympus?",
+      "expected_action": "answer",
+      "product": "olympus",
+      "intent": "onboarding",
+      "risk": "low",
+      "required_fact_ids": ["olympus.onboarding.login"],
+      "forbidden_claims": []
+    },
+    {
+      "id": "o002",
+      "question": "Can I use an imported wallet in Olympus?",
+      "expected_action": "answer",
+      "product": "olympus",
+      "intent": "wallets",
+      "risk": "high",
+      "required_fact_ids": ["olympus.wallets.imported_available"],
+      "forbidden_claims": ["imported wallets are not supported"]
+    },
+    {
+      "id": "o003",
+      "question": "Is my imported wallet gasless?",
+      "expected_action": "clarify",
+      "product": "olympus",
+      "intent": "wallets",
+      "risk": "high",
+      "required_fact_ids": ["olympus.wallets.imported_available"],
+      "forbidden_claims": ["all imported wallets are gasless", "all imported wallets are not gasless"]
+    },
+    {
+      "id": "o004",
+      "question": "Where can I find the Olympus fee details?",
+      "expected_action": "answer",
+      "product": "olympus",
+      "intent": "fees",
+      "risk": "high",
+      "required_fact_ids": ["olympus.fees.link"],
+      "forbidden_claims": ["Olympus has no fees"]
+    },
+    {
+      "id": "o005",
+      "question": "How does Olympus copy trading work?",
+      "expected_action": "answer",
+      "product": "olympus",
+      "intent": "copy_trading",
+      "risk": "high",
+      "required_fact_ids": ["olympus.copy_trade.behavior"],
+      "forbidden_claims": ["copying is guaranteed to be identical"]
+    },
+    {
+      "id": "o006",
+      "question": "Does backtesting guarantee my future returns?",
+      "expected_action": "answer",
+      "product": "olympus",
+      "intent": "copy_trading",
+      "risk": "high",
+      "required_fact_ids": ["olympus.copy_trade.backtesting", "olympus.performance.no_guarantee"],
+      "forbidden_claims": ["guaranteed future returns", "backtesting guarantees profit"]
+    },
+    {
+      "id": "o007",
+      "question": "Where do I find Moneyline for a sports event?",
+      "expected_action": "answer",
+      "product": "olympus",
+      "intent": "sports",
+      "risk": "low",
+      "required_fact_ids": ["olympus.sports.navigation"],
+      "forbidden_claims": []
+    },
+    {
+      "id": "o008",
+      "question": "The market is missing from this specific sports event.",
+      "expected_action": "escalate",
+      "product": "olympus",
+      "intent": "sports",
+      "risk": "high",
+      "required_fact_ids": ["olympus.sports.navigation"],
+      "forbidden_claims": ["the market is definitely available"]
+    },
+    {
+      "id": "o009",
+      "question": "Why is my leverage or close behavior different than expected?",
+      "expected_action": "escalate",
+      "product": "olympus",
+      "intent": "dimes",
+      "risk": "high",
+      "required_fact_ids": ["olympus.dimes.external"],
+      "forbidden_claims": ["Dimes definitely caused your exact result"]
+    },
+    {
+      "id": "o010",
+      "question": "Can you check my Olympus balance and redeem transaction?",
+      "expected_action": "escalate",
+      "product": "olympus",
+      "intent": "support_triage",
+      "risk": "critical",
+      "required_fact_ids": ["olympus.account_specific.escalate"],
+      "forbidden_claims": ["your funds are safe", "the transaction definitely succeeded"]
+    },
+    {
+      "id": "o011",
+      "question": "Will Olympus make me profitable?",
+      "expected_action": "answer",
+      "product": "olympus",
+      "intent": "performance",
+      "risk": "high",
+      "required_fact_ids": ["olympus.performance.no_guarantee"],
+      "forbidden_claims": ["guaranteed profit", "you will be profitable"]
+    },
+    {
+      "id": "o012",
+      "question": "My Olympus copy trade filled with the wrong size.",
+      "expected_action": "escalate",
+      "product": "olympus",
+      "intent": "copy_trading",
+      "risk": "critical",
+      "required_fact_ids": ["olympus.copy_trade.behavior"],
+      "forbidden_claims": ["the fill is definitely correct"]
+    },
+    {
+      "id": "g001",
+      "question": "Hey everyone, good morning!",
+      "expected_action": "ignore",
+      "product": "generic",
+      "intent": "social",
+      "risk": "low",
+      "required_fact_ids": [],
+      "forbidden_claims": []
+    },
+    {
+      "id": "g002",
+      "question": "What should I do here?",
+      "expected_action": "clarify",
+      "product": "generic",
+      "intent": "underspecified",
+      "risk": "low",
+      "required_fact_ids": [],
+      "forbidden_claims": []
+    }
+  ]
+}

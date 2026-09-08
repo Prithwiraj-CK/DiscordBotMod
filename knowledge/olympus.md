@@ -30,9 +30,12 @@ perps protection.
 package for markets and the CLOB, Privy for wallets and auth.
 
 **Wallets**: every user has a signing key (a Privy embedded wallet) and a
-separate trading address where funds and positions actually live. The signer
-never holds trading funds. When someone reports a balance on "the wrong
-address", this distinction is usually why, and it is an escalation.
+separate trading address where funds and positions actually live. Imported
+wallet flows are also available. The signer never holds trading funds. When
+someone reports a balance on "the wrong address", this distinction is usually
+why, and it is an escalation. Do not assume an imported wallet has the same
+Safe or gasless setup as an Olympus-created wallet; inspect the account-specific
+wallet type.
 
 ## What users get
 
