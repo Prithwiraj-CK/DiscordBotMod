@@ -55,6 +55,20 @@ Drop `valhalla.md` and `olympus.md` into `knowledge/`. See `knowledge/README.md`
 python bot.py
 ```
 
+For automatic restart while this Mac is logged in, install the local
+shadow-mode `launchd` service:
+
+```bash
+chmod +x ops/run-shadow.sh
+mkdir -p .runtime
+cp ops/com.discordbotmod.shadow.plist "$HOME/Library/LaunchAgents/"
+launchctl bootstrap "gui/$(id -u)" "$HOME/Library/LaunchAgents/com.discordbotmod.shadow.plist"
+```
+
+The service restarts after a gateway failure and writes logs to `.runtime/`.
+It cannot run while the Mac is powered off or asleep, and it always forces
+`SHADOW_MODE=true`.
+
 ### 5. Validate the knowledge corpus
 
 The approved source-of-truth index and anonymized regression cases can be
