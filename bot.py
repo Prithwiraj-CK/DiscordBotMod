@@ -850,6 +850,28 @@ _SECURITY_RE = re.compile(
 )
 
 
+_INTENT_HINTS = (
+    (re.compile(r"\b(referral|invite|invitation|code)\b", re.IGNORECASE), "onboarding"),
+    (re.compile(r"\b(start|setup|setting_dlmm|getting started|sign in|login)\b", re.IGNORECASE), "onboarding"),
+    (re.compile(r"\b(fee|fees|charge|charges)\b", re.IGNORECASE), "fees"),
+    (re.compile(r"\b(ratio|entry mode|sol only|sol_or_usdc|any mode)\b", re.IGNORECASE), "settings"),
+    (re.compile(r"\b(jupiter score|pumpfun|stonkfun|safety rail)\b", re.IGNORECASE), "risk_controls"),
+    (re.compile(r"\b(damm|dlmm|copy trade|copy trading|follow(ed)? wallet)\b", re.IGNORECASE), "copy_trading"),
+    (re.compile(r"\b(profit|profitable|returns|gains|make money)\b", re.IGNORECASE), "performance"),
+    (re.compile(r"\b(imported wallet|gasless|eoa|safe|pol|signing address|trading address)\b", re.IGNORECASE), "wallets"),
+    (re.compile(r"\b(limit placed|partial fill|copied|order status|open orders)\b", re.IGNORECASE), "orders"),
+    (re.compile(r"\b(sports?|moneyline|game view|game|market)\b", re.IGNORECASE), "sports"),
+    (re.compile(r"\b(dimes|leverage|closing)\b", re.IGNORECASE), "leverage"),
+)
+
+
+def _intent_hint(query):
+    for pattern, intent in _INTENT_HINTS:
+        if pattern.search(query):
+            return intent
+    return None
+
+
 def _evidence_text(facts):
     blocks = []
     for fact in facts:
@@ -863,6 +885,16 @@ def _evidence_text(facts):
             lines.append("Links: {}".format(", ".join(fact["links"])))
         blocks.append("\n".join(lines))
     return "\n\n".join(blocks) or "(no approved evidence matched)"
+
+
+def _claim_is_in_evidence(claim, facts):
+    normalized_claim = " ".join(str(claim or "").casefold().split())
+    normalized_evidence = " ".join(
+        " ".join(str(fact.get(field, "")).casefold().split())
+        for fact in facts
+        for field in ("fact", "answer_guidance")
+    )
+    return bool(normalized_claim) and normalized_claim in normalized_evidence
 
 
 def autonomous_decision(query, turns, product_hint=None):
@@ -882,6 +914,11 @@ def autonomous_decision(query, turns, product_hint=None):
     action = route.get("action")
     product = route.get("product")
     intent = route.get("intent")
+    hinted_intent = _intent_hint(query)
+    if hinted_intent:
+        intent = hinted_intent
+    if product_hint in {"valhalla", "olympus"}:
+        product = product_hint
     facts = retrieve_facts(query, product=product, intent=intent, limit=6)
     fact_ids = {str(fact.get("id", "")) for fact in facts}
     log.info(
@@ -897,6 +934,11 @@ def autonomous_decision(query, turns, product_hint=None):
             "evidence_ids": sorted(fact_ids), "missing_information": [],
             "draft_answer": ESCALATE, "unsupported_claims": [],
         }
+    # A message that reaches this function has already passed the channel and
+    # addressing filters. Direct questions should not be silently ignored just
+    # because the classifier is uncertain; answer from evidence or clarify.
+    if action == "ignore" and _asks_something(query):
+        action = "answer" if facts else "clarify"
     if action == "ignore":
         return {
             "action": "ignore", "product": product, "intent": intent,
@@ -988,8 +1030,14 @@ def autonomous_decision(query, turns, product_hint=None):
             name="support_validation",
             temperature=0.0,
         )
-    unsupported = list(validation.get("unsupported_claims", []))
-    unsupported.extend(validation.get("forbidden_claims", []))
+    unsupported = [
+        claim for claim in validation.get("unsupported_claims", [])
+        if not _claim_is_in_evidence(claim, facts)
+    ]
+    unsupported.extend(
+        claim for claim in validation.get("forbidden_claims", [])
+        if not _claim_is_in_evidence(claim, facts)
+    )
     if validation.get("supported") is not True or unsupported:
         log.warning("Rejected unsupported draft: %s", unsupported)
         return {
