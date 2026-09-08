@@ -73,6 +73,11 @@ def retrieve_facts(query: str, product: str | None = None,
     candidates = topic_facts or product_facts
     scored = []
     for fact in candidates:
+        retrieval_terms = {
+            token for token in _fact_tokens(" ".join(fact.get("retrieval_terms", [])))
+        }
+        if retrieval_terms and not (query_tokens & retrieval_terms):
+            continue
         searchable = " ".join(
             str(fact.get(field, ""))
             for field in ("id", "product", "topic", "fact", "answer_guidance")

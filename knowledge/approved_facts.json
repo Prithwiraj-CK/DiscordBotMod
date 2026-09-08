@@ -15,6 +15,7 @@
       "action": "answer",
       "fact": "A referral code is not required to start Valhalla.",
       "answer_guidance": "Tell the user to run /valhalla start or use the Valhalla website.",
+      "retrieval_terms": ["referral", "code", "invite", "invitation"],
       "source": {"kind": "product_owner_clarification", "ref": "user clarification 2026-09-08"},
       "last_verified": "2026-09-08",
       "risk": "low",

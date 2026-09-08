@@ -14,6 +14,7 @@ import argparse
 import json
 import re
 import sys
+import time
 from pathlib import Path
 from typing import Any
 
@@ -142,15 +143,107 @@ def score_answers(cases: list[dict[str, Any]], answers: Any) -> dict[str, Any]:
             forbidden = [claim for claim in case.get("forbidden_claims", []) if claim.casefold() in lowered]
             if forbidden:
                 errors.append(f"forbidden claims: {', '.join(forbidden)}")
+            unsupported = answer.get("unsupported_claims", [])
+            if unsupported:
+                errors.append("unsupported claims: " + "; ".join(map(str, unsupported)))
         results.append({"id": case["id"], "passed": not errors, "errors": errors})
     passed = sum(1 for result in results if result["passed"])
     return {"passed": passed, "failed": len(results) - passed, "total": len(results), "results": results}
+
+
+def run_openai_cases(cases: list[dict[str, Any]], post_to_test: bool = False) -> dict[str, Any]:
+    """Run every case through the production decision function.
+
+    Importing bot is safe here because this command never calls bot.main().
+    The Discord API is used only when post_to_test is explicitly requested.
+    """
+    import bot
+
+    token = None
+    if post_to_test:
+        from dotenv import load_dotenv
+        import os
+        import requests
+        load_dotenv(str(ROOT / ".env"))
+        token = os.getenv("DISCORD_USER_TOKEN", "").strip()
+        if not token:
+            raise ValueError("DISCORD_USER_TOKEN is required for --post-to-test")
+
+    answers = []
+    for number, case in enumerate(cases, 1):
+        question = case["question"]
+        try:
+            decision = bot.autonomous_decision(
+                question,
+                [{"role": "user", "content": question}],
+                product_hint=case["product"] if case["product"] in {"valhalla", "olympus"} else None,
+            )
+            answer = {
+                "id": case["id"],
+                "action": decision.get("action"),
+                "evidence_ids": decision.get("evidence_ids", []),
+                "text": decision.get("draft_answer", ""),
+                "unsupported_claims": decision.get("unsupported_claims", []),
+            }
+        except Exception as exc:
+            answer = {
+                "id": case["id"],
+                "action": "error",
+                "evidence_ids": [],
+                "text": "",
+                "unsupported_claims": [f"{type(exc).__name__}: {exc}"],
+            }
+        answers.append(answer)
+        if post_to_test:
+            _post_test_result(token, case, answer)
+            time.sleep(0.35)
+        print(f"Replay {number}/{len(cases)}: {case['id']} -> {answer['action']}", flush=True)
+
+    return score_answers(cases, answers)
+
+
+def _post_test_result(token: str, case: dict[str, Any], answer: dict[str, Any]) -> None:
+    import requests
+
+    text = answer.get("text") or "[no draft]"
+    if text == "[[ESCALATE]]":
+        text = "[autonomous escalation proposal]"
+    elif text == "[[IGNORE]]":
+        text = "[autonomous ignore decision]"
+    evidence = ", ".join(answer.get("evidence_ids", [])) or "none"
+    unsupported = ", ".join(answer.get("unsupported_claims", [])) or "none"
+    body = (
+        "**eval {id}** · expected \x60{expected}\x60 · actual \x60{actual}\x60\n"
+        "> {question}\n\n"
+        "{text}\n\n"
+        "\x60evidence: {evidence}\x60\n"
+        "\x60unsupported: {unsupported}\x60"
+    ).format(
+        id=case["id"],
+        expected=case["expected_action"],
+        actual=answer.get("action", "error"),
+        question=case["question"].replace("\n", " ")[:500],
+        text=text[:1000],
+        evidence=evidence[:600],
+        unsupported=unsupported[:500],
+    )
+    response = requests.post(
+        "https://discord.com/api/v9/channels/1546057978921095178/messages",
+        headers={"Authorization": token, "Content-Type": "application/json"},
+        json={"content": body[:2000], "allowed_mentions": {"parse": []}},
+        timeout=20,
+    )
+    if response.status_code not in (200, 201):
+        detail = response.text.replace("\n", " ")[:500]
+        raise ValueError(f"Discord test-channel post failed: HTTP {response.status_code}: {detail}")
 
 
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--list", action="store_true", help="list the anonymized regression cases")
     parser.add_argument("--answers", type=Path, help="score a JSON file of structured answers")
+    parser.add_argument("--run-openai", action="store_true", help="run all cases through the OpenAI pipeline")
+    parser.add_argument("--post-to-test", action="store_true", help="post each replay result to #bot-test")
     parser.add_argument("--json", action="store_true", help="emit machine-readable output")
     args = parser.parse_args()
 
@@ -158,6 +251,8 @@ def main() -> int:
         facts_payload, cases_payload = validate_corpus()
         facts = facts_payload["facts"]
         cases = cases_payload["cases"]
+        if args.post_to_test and not args.run_openai:
+            raise ValueError("--post-to-test requires --run-openai")
         if args.list:
             output: Any = [
                 {
@@ -171,6 +266,8 @@ def main() -> int:
             ]
         elif args.answers:
             output = score_answers(cases, load_json(args.answers))
+        elif args.run_openai:
+            output = run_openai_cases(cases, post_to_test=args.post_to_test)
         else:
             output = {
                 "status": "ok",
@@ -190,7 +287,7 @@ def main() -> int:
     elif args.list:
         for case in output:
             print(f"{case['id']} [{case['action']}/{case['product']}/{case['intent']}]: {case['question']}")
-    elif args.answers:
+    elif args.answers or args.run_openai:
         print(f"Scored {output['total']} cases: {output['passed']} passed, {output['failed']} failed")
         for result in output["results"]:
             if not result["passed"]:

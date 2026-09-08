@@ -452,6 +452,17 @@ DRAFT_SCHEMA = {
     "required": ["action", "evidence_ids", "missing_information", "draft_answer"],
 }
 
+VALIDATION_SCHEMA = {
+    "type": "object",
+    "additionalProperties": False,
+    "properties": {
+        "supported": {"type": "boolean"},
+        "unsupported_claims": {"type": "array", "items": {"type": "string"}},
+        "forbidden_claims": {"type": "array", "items": {"type": "string"}},
+    },
+    "required": ["supported", "unsupported_claims", "forbidden_claims"],
+}
+
 ROUTER_SYSTEM = """Classify the current Discord message for an autonomous product-support bot.
 Choose exactly one action:
 - answer: the approved knowledge clearly answers a general product question
@@ -472,12 +483,28 @@ claim with one or more evidence_ids. If the evidence does not support an
 answer, choose escalate. For clarify, ask exactly one short question and do
 not guess. For ignore, leave draft_answer empty.
 
+Answer only what the current message asks. Do not volunteer adjacent facts just
+because they appear in the evidence. For example, do not mention referral codes
+when the user only asks how to start; mention that only when they ask about a
+referral or code.
+
 Keep it concise, warm, and direct. Do not claim to see a user's account,
 balance, trade, logs, or funds. Never request a private key, seed phrase,
 password, PIN, or API key. Never promise profit, safety, recovery, or a fix.
 Do not claim to be human or deny being a bot. If a fee question has an approved
 link, include the link. A human handoff is an autonomous safety decision, not a
 request for approval.
+
+APPROVED EVIDENCE
+"""
+
+VALIDATOR_SYSTEM = """Audit the proposed support response against the approved evidence below.
+Return supported=true only when every factual claim in the response is supported
+by the evidence. Treat unsupported product behavior, causes, timelines, account
+status, balances, safety claims, and profit claims as unsupported. Also flag
+requests for secrets and claims that contradict the evidence. A short social
+reply with no factual claim is supported. This audit is autonomous and must not
+ask staff for approval.
 
 APPROVED EVIDENCE
 """
@@ -838,11 +865,16 @@ def _evidence_text(facts):
     return "\n\n".join(blocks) or "(no approved evidence matched)"
 
 
-def _autonomous_response(query, turns):
-    """Classify, retrieve, decide, validate, and draft without staff approval."""
+def autonomous_decision(query, turns, product_hint=None):
+    """Return the autonomous routing decision and its validation metadata."""
+    classifier_input = query
+    if product_hint in {"valhalla", "olympus"}:
+        classifier_input = "Source-channel product context: {}\nCurrent message: {}".format(
+            product_hint, query,
+        )
     route = ask_json(
         ROUTER_SYSTEM,
-        [{"role": "user", "content": query}],
+        [{"role": "user", "content": classifier_input}],
         ROUTE_SCHEMA,
         name="support_route",
         temperature=0.0,
@@ -859,15 +891,40 @@ def _autonomous_response(query, turns):
 
     # Deterministic safety gates override a model choice for high-risk text.
     if _MUST_ESCALATE_RE.search(query) or _SECURITY_RE.search(query):
-        return ESCALATE
+        return {
+            "action": "escalate", "product": product, "intent": intent,
+            "risk": "critical", "confidence": route.get("confidence", 0),
+            "evidence_ids": sorted(fact_ids), "missing_information": [],
+            "draft_answer": ESCALATE, "unsupported_claims": [],
+        }
     if action == "ignore":
-        return IGNORE
+        return {
+            "action": "ignore", "product": product, "intent": intent,
+            "risk": route.get("risk"), "confidence": route.get("confidence", 0),
+            "evidence_ids": [], "missing_information": route.get("missing_information", []),
+            "draft_answer": IGNORE, "unsupported_claims": [],
+        }
     if action == "escalate":
-        return ESCALATE
+        return {
+            "action": "escalate", "product": product, "intent": intent,
+            "risk": route.get("risk"), "confidence": route.get("confidence", 0),
+            "evidence_ids": sorted(fact_ids), "missing_information": route.get("missing_information", []),
+            "draft_answer": ESCALATE, "unsupported_claims": [],
+        }
     if action not in {"answer", "clarify"}:
-        return ESCALATE
+        return {
+            "action": "escalate", "product": product, "intent": intent,
+            "risk": "critical", "confidence": route.get("confidence", 0),
+            "evidence_ids": sorted(fact_ids), "missing_information": [],
+            "draft_answer": ESCALATE, "unsupported_claims": ["invalid route action"],
+        }
     if action == "answer" and not facts and intent not in {"social", "unknown"}:
-        return ESCALATE
+        return {
+            "action": "escalate", "product": product, "intent": intent,
+            "risk": "high", "confidence": route.get("confidence", 0),
+            "evidence_ids": [], "missing_information": [],
+            "draft_answer": ESCALATE, "unsupported_claims": ["no approved evidence matched"],
+        }
 
     draft_prompt = DRAFTER_SYSTEM + _evidence_text(facts)
     draft = ask_json(
@@ -880,19 +937,79 @@ def _autonomous_response(query, turns):
     draft_action = draft.get("action")
     used_ids = {str(value) for value in draft.get("evidence_ids", [])}
     if draft_action not in {"answer", "clarify"}:
-        return ESCALATE if draft_action == "escalate" else IGNORE
+        effective_action = "escalate" if draft_action == "escalate" else "ignore"
+        return {
+            "action": effective_action, "product": product, "intent": intent,
+            "risk": route.get("risk"), "confidence": route.get("confidence", 0),
+            "evidence_ids": sorted(used_ids & fact_ids),
+            "missing_information": draft.get("missing_information", []),
+            "draft_answer": ESCALATE if effective_action == "escalate" else IGNORE,
+            "unsupported_claims": [],
+        }
     if not used_ids.issubset(fact_ids):
         log.warning("Rejected draft with evidence outside retrieval set: %s", used_ids - fact_ids)
-        return ESCALATE
+        return {
+            "action": "escalate", "product": product, "intent": intent,
+            "risk": "critical", "confidence": route.get("confidence", 0),
+            "evidence_ids": sorted(used_ids & fact_ids),
+            "missing_information": [], "draft_answer": ESCALATE,
+            "unsupported_claims": ["evidence outside retrieval set"],
+        }
     if draft_action == "answer" and not used_ids and intent not in {"social", "unknown"}:
-        return ESCALATE
+        return {
+            "action": "escalate", "product": product, "intent": intent,
+            "risk": "high", "confidence": route.get("confidence", 0),
+            "evidence_ids": [], "missing_information": [],
+            "draft_answer": ESCALATE, "unsupported_claims": ["answer without evidence"],
+        }
     answer = (draft.get("draft_answer") or "").strip()
     if not answer:
-        return IGNORE if draft_action == "ignore" else ESCALATE
+        return {
+            "action": "escalate", "product": product, "intent": intent,
+            "risk": "high", "confidence": route.get("confidence", 0),
+            "evidence_ids": sorted(used_ids), "missing_information": [],
+            "draft_answer": ESCALATE, "unsupported_claims": ["empty draft"],
+        }
     if draft_action == "clarify" and len(answer) > 1000:
         log.warning("Rejected oversized clarification")
-        return ESCALATE
-    return answer
+        return {
+            "action": "escalate", "product": product, "intent": intent,
+            "risk": "high", "confidence": route.get("confidence", 0),
+            "evidence_ids": sorted(used_ids), "missing_information": [],
+            "draft_answer": ESCALATE, "unsupported_claims": ["oversized clarification"],
+        }
+
+    validation = {"supported": True, "unsupported_claims": [], "forbidden_claims": []}
+    if facts and answer:
+        validation = ask_json(
+            VALIDATOR_SYSTEM + _evidence_text(facts),
+            [{"role": "user", "content": "DRAFT RESPONSE:\n" + answer}],
+            VALIDATION_SCHEMA,
+            name="support_validation",
+            temperature=0.0,
+        )
+    unsupported = list(validation.get("unsupported_claims", []))
+    unsupported.extend(validation.get("forbidden_claims", []))
+    if validation.get("supported") is not True or unsupported:
+        log.warning("Rejected unsupported draft: %s", unsupported)
+        return {
+            "action": "escalate", "product": product, "intent": intent,
+            "risk": "critical", "confidence": route.get("confidence", 0),
+            "evidence_ids": sorted(used_ids), "missing_information": [],
+            "draft_answer": ESCALATE, "unsupported_claims": unsupported or ["validator rejected draft"],
+        }
+    return {
+        "action": draft_action, "product": product, "intent": intent,
+        "risk": route.get("risk"), "confidence": route.get("confidence", 0),
+        "evidence_ids": sorted(used_ids),
+        "missing_information": draft.get("missing_information", []),
+        "draft_answer": answer, "unsupported_claims": [],
+    }
+
+
+def _autonomous_response(query, turns, product_hint=None):
+    """Return the validated autonomous response text."""
+    return autonomous_decision(query, turns, product_hint=product_hint).get("draft_answer", ESCALATE)
 
 
 def _recent_context(channel_id, before_id):
