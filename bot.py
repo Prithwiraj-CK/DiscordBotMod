@@ -161,13 +161,13 @@ GUILD_ID = os.getenv("GUILD_ID", "925207817923743794").strip()
 # Individual channels to read.
 WATCH_CHANNEL_IDS = _parse_channel_ids(
     os.getenv("WATCH_CHANNEL_IDS", "")
-    or "927612226439880834,1509446310552539267,1484774527610392576"
+    or "925207817923743797,927612226439880834"
 )
 
 # Categories to read: every text channel inside them, resolved at startup.
 WATCH_CATEGORY_IDS = _parse_channel_ids(
     os.getenv("WATCH_CATEGORY_IDS", "")
-    or "1509163128636702842,1305503692929110106"
+    or "1466703931194212445"
 )
 
 # Filled in by _resolve_watched(). Always includes OUTPUT_CHANNEL_ID so the
