@@ -484,7 +484,8 @@ not guess. For ignore, leave draft_answer empty.
 Answer only what the current message asks. Do not volunteer adjacent facts just
 because they appear in the evidence. For example, do not mention referral codes
 when the user only asks how to start; mention that only when they ask about a
-referral or code.
+referral or code. Likewise, do not mention Max per Token or another setting
+unless the current message explicitly asks about that setting.
 
 Keep it concise, warm, and direct. Do not claim to see a user's account,
 balance, trade, logs, or funds. Never request a private key, seed phrase,
@@ -904,6 +905,8 @@ def _action_hint(query, product, intent):
         lowered,
     ):
         return "answer"
+    if product == "valhalla" and re.search(r"\b(?:dlmm\s+)?ratio\b", lowered):
+        return "answer"
     if product == "valhalla" and re.search(
         r"\b(find|where|which)\b.*\b(wallets?|traders?)\b.*\b(follow|copy)\b",
         lowered,
@@ -1008,6 +1011,10 @@ def _known_safe_answer(query, product, facts):
     fact_map = {str(fact.get("id")): fact for fact in facts}
 
     if product == "valhalla":
+        if re.search(r"\b(?:dlmm\s+)?ratio\b", lowered):
+            ratio_fact = fact_map.get("valhalla.copy_trade.ratio", {}).get("fact", "")
+            if ratio_fact:
+                return ratio_fact
         if "api key" in lowered or "shyft" in lowered:
             return fact_map.get("valhalla.onboarding.no_api_key", {}).get("fact", "")
         if "mobile" in lowered and "start" in lowered:

@@ -20,6 +20,7 @@ log = logging.getLogger("support-bot.knowledge")
 KNOWLEDGE_DIR = Path(__file__).parent / "knowledge"
 APPROVED_FACTS_PATH = KNOWLEDGE_DIR / "approved_facts.json"
 HISTORY_INDEX_PATH = Path(__file__).parent / ".runtime" / "discord_history_index.json"
+HISTORY_OUTPUT_CHANNEL_ID = "1546057978921095178"
 
 _cached_text = ""
 _cached_fingerprint: tuple | None = None
@@ -103,6 +104,8 @@ def retrieve_facts(query: str, product: str | None = None,
         query_lower,
     ):
         related_ids.add("valhalla.performance.no_guarantee")
+    if product == "valhalla" and re.search(r"\b(?:dlmm\s+)?ratio\b", query_lower):
+        related_ids.add("valhalla.copy_trade.ratio")
     if product == "valhalla" and re.search(
         r"\bpnl\b.*\b(different|mismatch|wrong)\b|\b(different|mismatch|wrong)\b.*\bpnl\b",
         query_lower,
@@ -117,6 +120,23 @@ def retrieve_facts(query: str, product: str | None = None,
     for fact in product_facts:
         if fact.get("id") in related_ids and fact not in candidates:
             candidates.append(fact)
+
+    # Keep adjacent settings out of ratio answers unless the user explicitly
+    # asks for them. The ratio fact already explains the relevant comparison;
+    # unrelated setting details cause volunteered text.
+    if product == "valhalla" and re.search(r"\b(?:dlmm\s+)?ratio\b", query_lower):
+        explicit_settings = set()
+        if re.search(r"\bmax\s*per[- ]?token\b", query_lower):
+            explicit_settings.add("valhalla.settings.max_per_token")
+        if re.search(r"\bentry\s*mode\b|\bsol\s*only\b|\bsol_or_usdc\b", query_lower):
+            explicit_settings.add("valhalla.settings.entry_mode")
+        if re.search(r"\bfilter(?:s|ing)?\b", query_lower):
+            explicit_settings.add("valhalla.copy_trade.filters")
+        candidates = [
+            fact for fact in candidates
+            if fact.get("id") == "valhalla.copy_trade.ratio"
+            or fact.get("id") in explicit_settings
+        ]
 
     # A sizing question may use two SOL amounts without saying "ratio". The
     # ratio and performance caveat are both relevant evidence in that case.
@@ -206,6 +226,10 @@ def retrieve_history(query: str, product: str | None = None, limit: int = 4) -> 
         return []
     scored = []
     for item in load_history_index():
+        # The test channel contains generated eval transcripts, not source
+        # support. Never let the bot learn its own drafts as staff examples.
+        if str(item.get("channel_id", "")) == HISTORY_OUTPUT_CHANNEL_ID:
+            continue
         searchable = " ".join(
             str(item.get(field, ""))
             for field in ("channel_name", "content", "question_context")

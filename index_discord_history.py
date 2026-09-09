@@ -98,15 +98,10 @@ def channels_to_index() -> list[dict]:
                 "name": channel.get("name") or channel_id,
                 "parent_id": str(channel.get("parent_id") or ""),
             })
-    if not any(channel["id"] == OUTPUT_CHANNEL_ID for channel in picked):
-        for channel in channels:
-            if str(channel.get("id")) == OUTPUT_CHANNEL_ID and channel.get("type") in (0, 5):
-                picked.append({
-                    "id": OUTPUT_CHANNEL_ID,
-                    "name": channel.get("name") or OUTPUT_CHANNEL_ID,
-                    "parent_id": str(channel.get("parent_id") or ""),
-                })
-                break
+    # #bot-test is an output/transcript channel. It may be allowed for live
+    # shadow proposals, but its generated messages must never become training
+    # or retrieval material for future answers.
+    picked = [channel for channel in picked if channel["id"] != OUTPUT_CHANNEL_ID]
     return sorted(picked, key=lambda channel: (channel["name"].lower(), channel["id"]))
 
 

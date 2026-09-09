@@ -922,6 +922,26 @@
       "risk": "high",
       "required_fact_ids": ["olympus.failsafe.orphan_stray"],
       "forbidden_claims": ["the bot can confirm my specific funds are safe"]
+    },
+    {
+      "id": "v041",
+      "question": "Do you use a low DLMM ratio, or a static max amount with the DLMM ratio at 100%?",
+      "expected_action": "answer",
+      "product": "valhalla",
+      "intent": "settings",
+      "risk": "high",
+      "required_fact_ids": ["valhalla.copy_trade.ratio"],
+      "forbidden_claims": ["Max per Token is a ceiling", "100% is always the correct ratio", "guaranteed profit"]
+    },
+    {
+      "id": "v042",
+      "question": "If the trader risks 10% of their wallet per position, how should I set my Valhalla ratio?",
+      "expected_action": "answer",
+      "product": "valhalla",
+      "intent": "settings",
+      "risk": "high",
+      "required_fact_ids": ["valhalla.copy_trade.ratio"],
+      "forbidden_claims": ["this ratio is safe", "guaranteed profit", "you should risk exactly 10%"]
     }
   ]
 }
