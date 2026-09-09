@@ -540,7 +540,7 @@
       "product": "olympus",
       "intent": "copy_trading",
       "risk": "high",
-      "required_fact_ids": ["olympus.copy_trade.behavior", "olympus.performance.no_guarantee"],
+      "required_fact_ids": ["olympus.copy_trade.behavior", "olympus.copy_trade.wallet_discovery", "olympus.performance.no_guarantee"],
       "forbidden_claims": ["this wallet will make you money", "guaranteed gains"]
     },
     {
@@ -572,6 +572,16 @@
       "risk": "medium",
       "required_fact_ids": ["valhalla.access.nft_subscription_optional"],
       "forbidden_claims": ["an NFT is required to start", "a subscription is required to start"]
+    },
+    {
+      "id": "v027",
+      "question": "Do I need an API key to set up Valhalla?",
+      "expected_action": "answer",
+      "product": "valhalla",
+      "intent": "onboarding",
+      "risk": "low",
+      "required_fact_ids": ["valhalla.onboarding.no_api_key"],
+      "forbidden_claims": ["send your API key", "you must create a Shyft key"]
     },
     {
       "id": "g004",

@@ -70,7 +70,47 @@ def retrieve_facts(query: str, product: str | None = None,
         fact for fact in product_facts
         if intent and intent != "unknown" and fact.get("topic") == intent
     ]
-    candidates = topic_facts or product_facts
+    candidates = list(topic_facts or product_facts)
+
+    # Account-specific failures often contain a product-topic word such as
+    # "order" or "wallet" but need the support-triage fact as well. Keep the
+    # topical facts and add the product's escalation guidance for these cases.
+    query_lower = (query or "").lower()
+    discrepancy_markers = (
+        "missing", "duplicat", "mismatch", "wrong", "failed", "stuck",
+        "discrepancy", "not there", "check my", "check it", "inspect my", "left over",
+    )
+    if any(marker in query_lower for marker in discrepancy_markers):
+        for fact in product_facts:
+            if fact.get("topic") == "support_triage" and fact not in candidates:
+                candidates.append(fact)
+
+    # Some words trigger the wrong topic classifier even though the question
+    # clearly needs a neighboring fact, such as backtesting plus returns or
+    # slippage plus a leftover position.
+    related_ids = set()
+    if product == "olympus" and "backtest" in query_lower:
+        related_ids.update({"olympus.copy_trade.backtesting", "olympus.performance.no_guarantee"})
+    if product == "olympus" and re.search(
+        r"\b(find|choose|select)\b.*\b(wallet|trader)\b.*\b(copy|follow)\b", query_lower,
+    ):
+        related_ids.add("olympus.performance.no_guarantee")
+    if product == "olympus" and any(marker in query_lower for marker in ("slippage", "left over", "skipped sell", "leader sell")):
+        related_ids.update({"olympus.copy_trade.execution_discrepancy", "olympus.copy_trade.behavior"})
+    if product == "olympus" and re.search(r"private key|seed phrase|mnemonic", query_lower):
+        related_ids.add("olympus.account_specific.escalate")
+    if product == "valhalla" and re.search(r"which command.*settings?|mobile.*start|website.*confusing", query_lower):
+        related_ids.update({"valhalla.onboarding.commands", "valhalla.onboarding.website"})
+    for fact in product_facts:
+        if fact.get("id") in related_ids and fact not in candidates:
+            candidates.append(fact)
+
+    # A sizing question may use two SOL amounts without saying "ratio". The
+    # ratio and performance caveat are both relevant evidence in that case.
+    if product == "valhalla" and len(re.findall(r"\b\d+(?:\.\d+)?\s*sol\b", query_lower)) >= 2:
+        for fact in product_facts:
+            if fact.get("id") in {"valhalla.copy_trade.ratio", "valhalla.performance.no_guarantee"} and fact not in candidates:
+                candidates.append(fact)
     scored = []
     for fact in candidates:
         retrieval_terms = {
@@ -87,6 +127,12 @@ def retrieve_facts(query: str, product: str | None = None,
         score = overlap
         if intent and intent != "unknown" and fact.get("topic") == intent:
             score += 4
+        if product == "valhalla" and len(re.findall(r"\b\d+(?:\.\d+)?\s*sol\b", query_lower)) >= 2 and fact.get("id") in {
+            "valhalla.copy_trade.ratio", "valhalla.performance.no_guarantee",
+        }:
+            score += 10
+        if fact.get("id") in related_ids:
+            score += 10
         if fact.get("action") == "escalate" and any(
             marker in query_tokens for marker in {"my", "missing", "wrong", "failed", "stuck", "discrepancy"}
         ):

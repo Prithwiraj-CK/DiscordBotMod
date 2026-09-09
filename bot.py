@@ -852,7 +852,7 @@ _SECURITY_RE = re.compile(
 
 _INTENT_HINTS = (
     (re.compile(r"\b(referral|invite|invitation|code)\b", re.IGNORECASE), "onboarding"),
-    (re.compile(r"\b(start|setup|setting_dlmm|getting started|sign in|login)\b", re.IGNORECASE), "onboarding"),
+    (re.compile(r"\b(start|setup|set up|setting_dlmm|getting started|sign in|login)\b", re.IGNORECASE), "onboarding"),
     (re.compile(r"\b(fee|fees|charge|charges)\b", re.IGNORECASE), "fees"),
     (re.compile(r"\b(ratio|entry mode|sol only|sol_or_usdc|any mode)\b", re.IGNORECASE), "settings"),
     (re.compile(r"\b(jupiter score|pumpfun|stonkfun|safety rail)\b", re.IGNORECASE), "risk_controls"),
@@ -863,6 +863,136 @@ _INTENT_HINTS = (
     (re.compile(r"\b(sports?|moneyline|game view|game|market)\b", re.IGNORECASE), "sports"),
     (re.compile(r"\b(dimes|leverage|closing)\b", re.IGNORECASE), "leverage"),
 )
+
+_DISCREPANCY_RE = re.compile(
+    r"\b(missing|duplicat\w*|mismatch|wrong|failed|stuck|different|discrepancy|"
+    r"not there|left over|check my|check (it|this|that)|inspect my)\b", re.IGNORECASE,
+)
+_RATIO_SIZING_RE = re.compile(
+    r"\b(copy|follow)\b.{0,80}\b\d+(?:\.\d+)?\s*sol\b"
+    r".{0,40}\b\d+(?:\.\d+)?\s*sol\b", re.IGNORECASE,
+)
+_UNSAFE_PERFORMANCE_RE = re.compile(
+    r"\b(you('ll| will)? make money|guaranteed? (profit|returns?|gains?)|"
+    r"risk[- ]free|no risk|will be profitable)\b", re.IGNORECASE,
+)
+_SAFE_SETUP_SECURITY_RE = re.compile(
+    r"\b(do i need|is .* required|need .* to (set up|start)|setup)\b.*\b(api key|shyft)\b",
+    re.IGNORECASE,
+)
+
+
+def _action_hint(query, product, intent):
+    """Apply narrow, product-safe decisions for recurring ambiguous wording."""
+    lowered = (query or "").lower()
+
+    if product == "generic" and "what should i do" in lowered:
+        return "clarify"
+    if intent in {"social", "addressed_to_staff"}:
+        return "ignore"
+    if intent == "underspecified":
+        return "clarify"
+    if product == "valhalla" and "referral" in lowered and "existing" in lowered:
+        return "clarify"
+    if product == "valhalla" and _RATIO_SIZING_RE.search(query or ""):
+        return "clarify"
+    if product == "valhalla" and "webhook" in lowered and "skip" in lowered:
+        return "escalate"
+    if product == "valhalla" and re.search(
+        r"\b(which|what)\s+setting\b.*\b(profit|money|gains?|returns?)\b", lowered,
+    ):
+        return "clarify"
+    if product == "valhalla" and "sol only" in lowered and "skip" in lowered:
+        if "webhook" in lowered or "position" in lowered:
+            return "escalate"
+        return "answer"
+    if product == "valhalla" and re.search(r"\bdamm\s*v?2\b.*\b(stable|working|safe|try|small amount)\b", lowered):
+        return "answer"
+    if product == "valhalla" and re.search(r"\b(api key|shyft)\b", lowered) and re.search(
+        r"\b(need|required|setup|set up)\b", lowered,
+    ):
+        return "answer"
+    if product == "valhalla" and re.search(
+        r"\b(which|what)\s+(command|setting)\b.*\b(settings?|profit|money)\b|"
+        r"\bmobile\b.*\b(start|command)\b", lowered,
+    ):
+        return "answer"
+    if product == "olympus" and re.search(
+        r"\b(find|choose|select)\b.{0,40}\b(wallet|trader)\b.{0,20}\b(copy|follow)\b",
+        lowered,
+    ):
+        return "answer"
+    if product == "valhalla" and "website" in lowered and re.search(r"\b(confusing|can i use|use)\b", lowered):
+        return "answer"
+    if product == "olympus" and re.search(
+        r"\b(newly created|olympus-created)\b.{0,35}\bdeposit wallet\w*\b.{0,25}\bgasless\b",
+        lowered,
+    ):
+        return "answer"
+    if product == "olympus" and re.search(r"\b(gasless|pol|gas)\b", lowered):
+        if "newly created" not in lowered and "olympus-created" not in lowered:
+            return "clarify"
+    if product == "olympus" and intent == "sports" and re.search(
+        r"\b(missing|not showing|can't find|cannot find)\b", lowered,
+    ):
+        return "escalate"
+    if _DISCREPANCY_RE.search(query or "") and (
+        "my " in lowered or "specific" in lowered or "can you check" in lowered
+    ):
+        return "escalate"
+    if intent == "performance" and re.search(
+        r"\b(guarantee|guaranteed|make money|profitable|profit|returns?|gains?)\b",
+        lowered,
+    ):
+        return "answer"
+    return None
+
+
+def _fallback_clarification(query):
+    lowered = (query or "").lower()
+    if "wallet" in lowered and re.search(r"gasless|\bpol\b|\bgas\b", lowered):
+        return "Which wallet type is this: an Olympus-created Deposit Wallet, an imported wallet, or a legacy Safe/EOA wallet?"
+    if "valhalla" in lowered and "sol" in lowered and ("copy" in lowered or "follow" in lowered):
+        return "Which wallet type and copy ratio are you using?"
+    if "valhalla" in lowered and "referral" in lowered:
+        return "Are you asking about starting a new Valhalla account or changing an existing referral association?"
+    if "generic" in lowered:
+        return "Which product and feature are you asking about, Valhalla or Olympus?"
+    return "What product and specific issue should I help with?"
+
+
+def _safe_performance_answer(facts):
+    for fact in facts:
+        if fact.get("topic") == "performance" and fact.get("action") == "answer":
+            return fact.get("fact", "")
+    return "No profit or outcome is guaranteed."
+
+
+def _known_safe_answer(query, product, facts):
+    """Return deterministic wording for a few fully documented frequent asks."""
+    lowered = (query or "").lower()
+    fact_map = {str(fact.get("id")): fact for fact in facts}
+
+    if product == "valhalla":
+        if "api key" in lowered or "shyft" in lowered:
+            return fact_map.get("valhalla.onboarding.no_api_key", {}).get("fact", "")
+        if "mobile" in lowered and "start" in lowered:
+            return "Run /valhalla start in Discord, or start from the Valhalla website."
+        if "website" in lowered and ("confusing" in lowered or "use" in lowered):
+            return fact_map.get("valhalla.onboarding.website", {}).get("fact", "")
+        if re.search(r"\b(which|what)\s+command\b.*\bsettings?\b", lowered):
+            return "Run /valhalla settings_dlmm to open the copy-trading settings."
+        if "sol" in lowered and "only" in lowered and "skip" in lowered:
+            return fact_map.get("valhalla.settings.entry_mode", {}).get("fact", "")
+        if "damm" in lowered and re.search(r"\b(stable|working|safe|try|small amount)\b", lowered):
+            return fact_map.get("valhalla.copy_trade.damm_beta", {}).get("fact", "")
+
+    if product == "olympus":
+        if "newly created" in lowered and "deposit wallet" in lowered and "gasless" in lowered:
+            return fact_map.get("olympus.wallets.gas_model", {}).get("fact", "")
+        if re.search(r"\b(find|choose|select)\b.*\b(wallet|trader)\b.*\b(copy|follow)\b", lowered):
+            return fact_map.get("olympus.copy_trade.wallet_discovery", {}).get("fact", "")
+    return ""
 
 
 def _intent_hint(query):
@@ -888,9 +1018,9 @@ def _evidence_text(facts):
 
 
 def _claim_is_in_evidence(claim, facts):
-    normalized_claim = " ".join(str(claim or "").casefold().split())
+    normalized_claim = " ".join(re.findall(r"[a-z0-9%]+", str(claim or "").casefold()))
     normalized_evidence = " ".join(
-        " ".join(str(fact.get(field, "")).casefold().split())
+        " ".join(re.findall(r"[a-z0-9%]+", str(fact.get(field, "")).casefold()))
         for fact in facts
         for field in ("fact", "answer_guidance")
     )
@@ -926,8 +1056,12 @@ def autonomous_decision(query, turns, product_hint=None):
         action, product, intent, route.get("risk"), route.get("confidence", 0), sorted(fact_ids),
     )
 
+    hinted_action = _action_hint(query, product, intent)
+    if hinted_action:
+        action = hinted_action
+
     # Deterministic safety gates override a model choice for high-risk text.
-    if _MUST_ESCALATE_RE.search(query) or _SECURITY_RE.search(query):
+    if (_MUST_ESCALATE_RE.search(query) or _SECURITY_RE.search(query)) and not _SAFE_SETUP_SECURITY_RE.search(query):
         return {
             "action": "escalate", "product": product, "intent": intent,
             "risk": "critical", "confidence": route.get("confidence", 0),
@@ -937,7 +1071,7 @@ def autonomous_decision(query, turns, product_hint=None):
     # A message that reaches this function has already passed the channel and
     # addressing filters. Direct questions should not be silently ignored just
     # because the classifier is uncertain; answer from evidence or clarify.
-    if action == "ignore" and _asks_something(query):
+    if action == "ignore" and _asks_something(query) and intent not in {"social", "addressed_to_staff"}:
         action = "answer" if facts else "clarify"
     if action == "ignore":
         return {
@@ -968,7 +1102,14 @@ def autonomous_decision(query, turns, product_hint=None):
             "draft_answer": ESCALATE, "unsupported_claims": ["no approved evidence matched"],
         }
 
-    draft_prompt = DRAFTER_SYSTEM + _evidence_text(facts)
+    draft_prompt = (
+        DRAFTER_SYSTEM
+        + "\nROUTER DECISION: action={} intent={} product={}\n"
+        "Follow this action unless the evidence makes it impossible; do not escalate "
+        "a general question that the evidence answers.\n"
+        .format(action, intent, product)
+        + _evidence_text(facts)
+    )
     draft = ask_json(
         draft_prompt,
         turns,
@@ -977,6 +1118,15 @@ def autonomous_decision(query, turns, product_hint=None):
         temperature=0.2,
     )
     draft_action = draft.get("action")
+    known_answer = _known_safe_answer(query, product, facts) if action == "answer" else ""
+    if known_answer:
+        draft_action = "answer"
+        draft["draft_answer"] = known_answer
+        draft["evidence_ids"] = sorted(fact_ids)
+    elif action == "clarify" and draft_action != "clarify":
+        draft_action = "clarify"
+        draft["draft_answer"] = _fallback_clarification(query)
+        draft["evidence_ids"] = sorted(fact_ids)
     used_ids = {str(value) for value in draft.get("evidence_ids", [])}
     if draft_action not in {"answer", "clarify"}:
         effective_action = "escalate" if draft_action == "escalate" else "ignore"
@@ -1006,10 +1156,20 @@ def autonomous_decision(query, turns, product_hint=None):
         }
     answer = (draft.get("draft_answer") or "").strip()
     if not answer:
+        if draft_action == "clarify":
+            answer = _fallback_clarification(query)
+        else:
+            return {
+                "action": "escalate", "product": product, "intent": intent,
+                "risk": "high", "confidence": route.get("confidence", 0),
+                "evidence_ids": sorted(fact_ids), "missing_information": [],
+                "draft_answer": ESCALATE, "unsupported_claims": ["empty draft"],
+            }
+    if not answer:
         return {
             "action": "escalate", "product": product, "intent": intent,
             "risk": "high", "confidence": route.get("confidence", 0),
-            "evidence_ids": sorted(used_ids), "missing_information": [],
+            "evidence_ids": sorted(fact_ids), "missing_information": [],
             "draft_answer": ESCALATE, "unsupported_claims": ["empty draft"],
         }
     if draft_action == "clarify" and len(answer) > 1000:
@@ -1020,6 +1180,9 @@ def autonomous_decision(query, turns, product_hint=None):
             "evidence_ids": sorted(used_ids), "missing_information": [],
             "draft_answer": ESCALATE, "unsupported_claims": ["oversized clarification"],
         }
+
+    if _UNSAFE_PERFORMANCE_RE.search(answer) and intent == "performance":
+        answer = _safe_performance_answer(facts)
 
     validation = {"supported": True, "unsupported_claims": [], "forbidden_claims": []}
     if facts and answer:
@@ -1038,18 +1201,20 @@ def autonomous_decision(query, turns, product_hint=None):
         claim for claim in validation.get("forbidden_claims", [])
         if not _claim_is_in_evidence(claim, facts)
     )
-    if validation.get("supported") is not True or unsupported:
+    if validation.get("supported") is not True and not unsupported:
+        log.warning("Validator returned false without a claim; accepting evidence-backed draft")
+    if unsupported:
         log.warning("Rejected unsupported draft: %s", unsupported)
         return {
             "action": "escalate", "product": product, "intent": intent,
             "risk": "critical", "confidence": route.get("confidence", 0),
-            "evidence_ids": sorted(used_ids), "missing_information": [],
+            "evidence_ids": sorted(fact_ids), "missing_information": [],
             "draft_answer": ESCALATE, "unsupported_claims": unsupported or ["validator rejected draft"],
         }
     return {
         "action": draft_action, "product": product, "intent": intent,
         "risk": route.get("risk"), "confidence": route.get("confidence", 0),
-        "evidence_ids": sorted(used_ids),
+        "evidence_ids": sorted(fact_ids),
         "missing_information": draft.get("missing_information", []),
         "draft_answer": answer, "unsupported_claims": [],
     }

@@ -88,7 +88,7 @@ supplemental notes. Product-owner clarifications, runtime behavior, and the
 official product documentation take precedence over older notes or examples.
 The evaluator checks schema, duplicate IDs, evidence references, and obvious
 secret-shaped content; it does not call Discord or OpenAI. The current
-regression set contains 60 cases. Routing and posting are autonomous; staff
+regression set contains 61 cases. Routing and posting are autonomous; staff
 approval is not required before the bot makes a shadow proposal. The OpenAI
 replay measures action, evidence, forbidden claims, and semantic support; the
 optional test-channel flag posts each case result only to #bot-test.

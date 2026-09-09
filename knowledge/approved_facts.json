@@ -60,6 +60,19 @@
       "approved": true
     },
     {
+      "id": "valhalla.onboarding.no_api_key",
+      "product": "valhalla",
+      "topic": "onboarding",
+      "action": "answer",
+      "fact": "Valhalla does not require an API key to set up or use its documented Discord flows.",
+      "answer_guidance": "Tell users to use /valhalla start and the documented setup commands. Never ask them to paste an API key or direct them to an obsolete third-party key provider.",
+      "retrieval_terms": ["api key", "apikey", "shyft", "setup key", "key required"],
+      "source": {"kind": "official_product_docs", "ref": "https://valhalla-bot.gitbook.io/valhalla-bot/getting-started"},
+      "last_verified": "2026-09-09",
+      "risk": "low",
+      "approved": true
+    },
+    {
       "id": "valhalla.fees.current_rates",
       "product": "valhalla",
       "topic": "fees",
@@ -285,6 +298,19 @@
       "answer_guidance": "Mention modeled fills and the user's own settings when relevant; never promise profitability.",
       "source": {"kind": "official_product_docs", "ref": "https://www.olympusx.app/docs/08-faq"},
       "last_verified": "2026-09-08",
+      "risk": "high",
+      "approved": true
+    },
+    {
+      "id": "olympus.copy_trade.wallet_discovery",
+      "product": "olympus",
+      "topic": "copy_trading",
+      "action": "answer",
+      "fact": "Olympus provides a leaderboard, top-wallet views, and per-trader pages where users can inspect potential leaders before following them.",
+      "answer_guidance": "Point users to the Olympus leaderboard or top-wallet views. Do not present any leader as guaranteed profitable; performance depends on the leader and the user's settings.",
+      "retrieval_terms": ["find wallet", "discover wallet", "leaderboard", "top wallet", "top trader", "per-trader", "choose wallet", "follow leader"],
+      "source": {"kind": "runtime_code", "ref": "olympus-main 5 frontend leaderboard, top-wallet, and per-trader flows"},
+      "last_verified": "2026-09-09",
       "risk": "high",
       "approved": true
     },
