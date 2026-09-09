@@ -185,6 +185,41 @@ user's wallet but the bot never opened it, so the bot will not manage it.
 - Enable 2FA on Discord and on the associated email
 - Never run commands from unknown sources, and never share keys with anyone
 
+## Extra FAQ coverage
+
+**How do I start copying a wallet?** After `/valhalla start`, open
+`/valhalla settings_dlmm`, choose **Follow Wallet**, and then **Turn On**.
+Keep this answer separate from settings advice: the user is asking for the
+activation path, not for a recommended risk profile.
+
+**What does Max per Token mean?** It is a per-user ceiling on cumulative SOL
+deposited into one token across the user's open positions. It is not a fresh
+limit for every followed wallet. Explain the scope, but do not recommend a
+number or call it a guarantee against loss.
+
+**Why is a position read-only?** A position opened directly on Meteora instead
+of through Valhalla is not tracked as a copied position, so Valhalla displays
+it without managing it. A specific position still needs account context.
+
+**Why do my PnL numbers look different?** The general calculation is current
+value plus fees earned minus deposited amount. Claimed fees belong in fees
+earned and should not be counted again inside current value. Do not calculate
+or confirm a user's actual result without their account data.
+
+**What filters can I use?** Each followed wallet can have its own take-profit,
+stop-loss, position-count and timeframe limits, plus minimum token age,
+market-cap, holder-count, and trade-volume filters. Answer only the filter
+asked about. Values are configuration choices, not promises of performance.
+
+**What does not copy?** General exclusions include adds to an existing
+position, claims below $2, manually opened DLMM positions, activity beyond the
+50-position cap, and unsupported pool assets. If someone reports a specific
+miss, use the account-specific escalation path instead of choosing a cause.
+
+**Why can I not see the position in Phantom?** Valhalla positions live on
+Meteora. The user needs to export the Valhalla wallet before that wallet can
+be viewed in Phantom. Never ask for the exported keys in chat.
+
 ## Escalate to a human
 
 Anything touching money or credentials, without exception:

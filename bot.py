@@ -492,6 +492,8 @@ password, PIN, or API key. Never promise profit, safety, recovery, or a fix.
 Do not claim to be human or deny being a bot. If a fee question has an approved
 link, include the link. A human handoff is an autonomous safety decision, not a
 request for approval.
+Historical excerpts below are only secondary context. Never cite HISTORY IDs
+in evidence_ids and never treat a historical excerpt as approved evidence.
 
 APPROVED EVIDENCE
 """
@@ -843,6 +845,18 @@ _SECURITY_RE = re.compile(
 
 _INTENT_HINTS = (
     (re.compile(r"\b(referral|invite|invitation|code)\b", re.IGNORECASE), "onboarding"),
+    (re.compile(r"\b(welcome bonus|referral commission|seven days)\b", re.IGNORECASE), "onboarding"),
+    (re.compile(r"\b(pnl|current value|fees earned|deposited amount|claimed fees)\b", re.IGNORECASE), "performance"),
+    (re.compile(r"\bmax per token\b", re.IGNORECASE), "settings"),
+    (re.compile(r"\b(filters?|token age|market cap|holder.count|trade.volume|take.profit|stop.loss)\b", re.IGNORECASE), "settings"),
+    (re.compile(r"\b(follow wallet|turn on|enable copy)\b", re.IGNORECASE), "onboarding"),
+    (re.compile(r"\b(find|where|which)\b.*\b(wallets?|traders?)\b.*\b(follow|copy)\b", re.IGNORECASE), "copy_trading"),
+    (re.compile(r"\b(read.only|untracked)\b", re.IGNORECASE), "copy_trading"),
+    (re.compile(r"\b(phantom|opened directly)\b", re.IGNORECASE), "wallets"),
+    (re.compile(r"\b(combo|combos|multi.leg|parlay)\b", re.IGNORECASE), "overview"),
+    (re.compile(r"\b(perps?|perpetual|pUSD|rsi|macd|ema|bollinger|automation rule)\b", re.IGNORECASE), "leverage"),
+    (re.compile(r"\b(in.play|in play|maker|best bid|taker fee)\b", re.IGNORECASE), "orders"),
+    (re.compile(r"\b(orphan|stray|failsafe|attribution record)\b", re.IGNORECASE), "copy_trading"),
     (re.compile(r"\b(start|setup|set up|setting_dlmm|getting started|sign in|login)\b", re.IGNORECASE), "onboarding"),
     (re.compile(r"\b(fee|fees|charge|charges)\b", re.IGNORECASE), "fees"),
     (re.compile(r"\b(ratio|entry mode|sol only|sol_or_usdc|any mode)\b", re.IGNORECASE), "settings"),
@@ -885,6 +899,27 @@ def _action_hint(query, product, intent):
         return "clarify"
     if product == "valhalla" and "referral" in lowered and "existing" in lowered:
         return "clarify"
+    if product == "valhalla" and re.search(
+        r"\b(follow wallet|turn on|enable copy|what filters?|token age|market cap|holder|volume|take profit|stop loss)\b",
+        lowered,
+    ):
+        return "answer"
+    if product == "valhalla" and re.search(
+        r"\b(find|where|which)\b.*\b(wallets?|traders?)\b.*\b(follow|copy)\b",
+        lowered,
+    ):
+        return "answer"
+    if product == "valhalla" and re.search(
+        r"\bpnl\b.*\b(different|mismatch|wrong)\b|\b(different|mismatch|wrong)\b.*\bpnl\b",
+        lowered,
+    ):
+        return "escalate"
+    if product == "valhalla" and re.search(
+        r"\b(what|which|does|can)\b.*\b(not copy|won't copy|will not copy|claim under|manual dlmm)\b|"
+        r"\b(read.only|read only|max per token|phantom|pnl|current value|fees earned|deposited)\b",
+        lowered,
+    ):
+        return "answer"
     if product == "valhalla" and _RATIO_SIZING_RE.search(query or ""):
         return "clarify"
     if product == "valhalla" and "webhook" in lowered and "skip" in lowered:
@@ -913,6 +948,14 @@ def _action_hint(query, product, intent):
         lowered,
     ):
         return "answer"
+    if product == "olympus" and re.search(
+        r"\b(ask ai|combo|multi.leg|parlay|perps?|perpetual|rsi|macd|ema|bollinger|in.play|in play|maker|best bid|taker fee|welcome bonus|referral commission|orphan|stray|failsafe)\b",
+        lowered,
+    ):
+        if re.search(r"\b(macd|ema|bollinger)\b", lowered):
+            return "answer"
+        if not re.search(r"\b(my|specific|check|missing|stuck|failed|wrong|discrepancy)\b", lowered):
+            return "answer"
     if product == "valhalla" and "website" in lowered and re.search(r"\b(confusing|can i use|use)\b", lowered):
         return "answer"
     if product == "olympus" and re.search(
@@ -977,12 +1020,16 @@ def _known_safe_answer(query, product, facts):
             return fact_map.get("valhalla.settings.entry_mode", {}).get("fact", "")
         if "damm" in lowered and re.search(r"\b(stable|working|safe|try|small amount)\b", lowered):
             return fact_map.get("valhalla.copy_trade.damm_beta", {}).get("fact", "")
+        if re.search(r"\b(find|where|which)\b.*\b(wallets?|traders?)\b.*\b(follow|copy)\b", lowered):
+            return fact_map.get("valhalla.copy_trade.wallet_discovery", {}).get("fact", "")
 
     if product == "olympus":
         if "newly created" in lowered and "deposit wallet" in lowered and "gasless" in lowered:
             return fact_map.get("olympus.wallets.gas_model", {}).get("fact", "")
         if re.search(r"\b(find|choose|select)\b.*\b(wallet|trader)\b.*\b(copy|follow)\b", lowered):
             return fact_map.get("olympus.copy_trade.wallet_discovery", {}).get("fact", "")
+        if re.search(r"\b(welcome bonus|referral commission)\b", lowered):
+            return fact_map.get("olympus.welcome_bonus.referral_commission", {}).get("fact", "")
     return ""
 
 

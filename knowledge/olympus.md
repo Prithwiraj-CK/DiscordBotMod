@@ -184,6 +184,51 @@ stall, most often when the wallet cannot cover gas.
 **Did the AI assistant place this trade?** It cannot place trades unconfirmed.
 Escalate.
 
+## Extra FAQ coverage
+
+**Can Ask AI trade for me?** Ask AI can search markets, read trading
+information, summarize a portfolio, and propose an order. It does not place
+the order until the user clicks **Confirm**. A report that an order happened
+without confirmation is a product incident, not something to explain away.
+
+**What is a combo?** A combo is a multi-leg parlay position. Several market
+outcomes are bundled together and every leg must settle successfully for the
+combined position to pay. It is not a basket of independent trades.
+
+**What are perps?** They are leveraged perpetual futures settled in pUSD and
+they do not expire. The supported instruments are SP500, GOLD, WTIOIL, NAS100,
+SILVER, and BTC. Explain the feature without recommending a direction,
+margin, leverage, or instrument.
+
+**Why did Perps Automation not fire?** RSI rules are the implemented strategy
+and evaluate closed candles. MACD Crossover, EMA Golden Cross, and Bollinger
+Band Touch are displayed placeholders and do not execute trades. A rule can
+also wait when the instrument already has a position, and long and short rules
+for one instrument cannot be mixed because exposure is netted per instrument.
+
+**What does in-play delay mean?** On live sports and esports markets,
+Polymarket can hold an order in a delayed state. If it does not clear within
+the allowed window, it may be treated as rejected. This explains the venue
+behavior generally, not the root cause of every individual failed order.
+
+**What is a Maker Copy-Buy?** It is priced at or below the best bid and rests
+on the order book. It can avoid taker fees, but the order may fill late or not
+fill at all.
+
+**When are Olympus fees collected?** Copy-trade fees are recorded as trades
+execute and collected in a daily on-chain sweep rather than appearing as a
+separate charge beside every fill. Use the official fee schedule for current
+rates and do not apply Olympus fees to Valhalla.
+
+**What is the welcome bonus?** A verified deposit of at least $50 into a newly
+created trading wallet within seven days raises referral commission from 25%
+to 30%. It is not a trading-fee discount or a zero-fee period.
+
+**What are Orphans and Strays?** The failsafe compares on-chain holdings with
+copy records. A Stray is attributed to a leader who has sold; an Orphan has no
+attribution record. Specific holdings or automatic closures still need human
+investigation.
+
 ## Escalate to a human
 
 This is a live trading product with real money. Escalate anything that is:

@@ -160,7 +160,7 @@
       "product": "valhalla",
       "intent": "copy_trading",
       "risk": "high",
-      "required_fact_ids": ["valhalla.performance.no_guarantee"],
+      "required_fact_ids": ["valhalla.performance.no_guarantee", "valhalla.copy_trade.wallet_discovery"],
       "forbidden_claims": ["this wallet will be profitable", "guaranteed gains"]
     },
     {
@@ -612,6 +612,316 @@
       "risk": "low",
       "required_fact_ids": [],
       "forbidden_claims": []
+    },
+    {
+      "id": "v028",
+      "question": "After /valhalla start, how do I turn on copy trading for a wallet?",
+      "expected_action": "answer",
+      "product": "valhalla",
+      "intent": "onboarding",
+      "risk": "low",
+      "required_fact_ids": ["valhalla.onboarding.follow_wallet_setup"],
+      "forbidden_claims": []
+    },
+    {
+      "id": "v029",
+      "question": "Where is the Follow Wallet button and how do I enable it?",
+      "expected_action": "answer",
+      "product": "valhalla",
+      "intent": "onboarding",
+      "risk": "low",
+      "required_fact_ids": ["valhalla.onboarding.follow_wallet_setup"],
+      "forbidden_claims": ["send your private key"]
+    },
+    {
+      "id": "v030",
+      "question": "What filters can I configure for each Valhalla wallet I follow?",
+      "expected_action": "answer",
+      "product": "valhalla",
+      "intent": "settings",
+      "risk": "high",
+      "required_fact_ids": ["valhalla.copy_trade.filters"],
+      "forbidden_claims": ["these filters guarantee profit"]
+    },
+    {
+      "id": "v031",
+      "question": "Can I set token age, market cap, holders, and volume filters separately per wallet?",
+      "expected_action": "answer",
+      "product": "valhalla",
+      "intent": "settings",
+      "risk": "high",
+      "required_fact_ids": ["valhalla.copy_trade.filters"],
+      "forbidden_claims": []
+    },
+    {
+      "id": "v032",
+      "question": "What kinds of Valhalla activity will not be copied?",
+      "expected_action": "answer",
+      "product": "valhalla",
+      "intent": "copy_trading",
+      "risk": "high",
+      "required_fact_ids": ["valhalla.copy_trade.scope_limits"],
+      "forbidden_claims": ["every Meteora action is copied"]
+    },
+    {
+      "id": "v033",
+      "question": "Does Valhalla copy a claim under two dollars or a manual DLMM position?",
+      "expected_action": "answer",
+      "product": "valhalla",
+      "intent": "copy_trading",
+      "risk": "high",
+      "required_fact_ids": ["valhalla.copy_trade.scope_limits"],
+      "forbidden_claims": ["manual positions are always copied"]
+    },
+    {
+      "id": "v034",
+      "question": "Why do I need to export the Valhalla wallet before looking for positions in Phantom?",
+      "expected_action": "answer",
+      "product": "valhalla",
+      "intent": "wallets",
+      "risk": "high",
+      "required_fact_ids": ["valhalla.wallets.positions_on_meteora"],
+      "forbidden_claims": ["paste the exported key in Discord"]
+    },
+    {
+      "id": "v035",
+      "question": "What does read-only mean for a Valhalla position?",
+      "expected_action": "answer",
+      "product": "valhalla",
+      "intent": "copy_trading",
+      "risk": "medium",
+      "required_fact_ids": ["valhalla.positions.untracked_read_only"],
+      "forbidden_claims": ["Valhalla will manage every on-chain position"]
+    },
+    {
+      "id": "v036",
+      "question": "How does Valhalla calculate position PnL?",
+      "expected_action": "answer",
+      "product": "valhalla",
+      "intent": "performance",
+      "risk": "high",
+      "required_fact_ids": ["valhalla.pnl.calculation"],
+      "forbidden_claims": ["claimed fees are counted twice"]
+    },
+    {
+      "id": "v037",
+      "question": "Are claimed fees included in current value as well as fees earned?",
+      "expected_action": "answer",
+      "product": "valhalla",
+      "intent": "performance",
+      "risk": "high",
+      "required_fact_ids": ["valhalla.pnl.calculation"],
+      "forbidden_claims": ["claimed fees are counted in both places"]
+    },
+    {
+      "id": "v038",
+      "question": "What is Valhalla Max per Token?",
+      "expected_action": "answer",
+      "product": "valhalla",
+      "intent": "settings",
+      "risk": "high",
+      "required_fact_ids": ["valhalla.settings.max_per_token"],
+      "forbidden_claims": ["it is a cap for each followed wallet"]
+    },
+    {
+      "id": "v039",
+      "question": "Does Max per Token apply separately to every wallet I follow?",
+      "expected_action": "answer",
+      "product": "valhalla",
+      "intent": "settings",
+      "risk": "high",
+      "required_fact_ids": ["valhalla.settings.max_per_token"],
+      "forbidden_claims": ["each followed wallet gets its own separate ceiling"]
+    },
+    {
+      "id": "v040",
+      "question": "Can I see my Valhalla positions in Phantom without exporting the wallet?",
+      "expected_action": "answer",
+      "product": "valhalla",
+      "intent": "wallets",
+      "risk": "high",
+      "required_fact_ids": ["valhalla.wallets.positions_on_meteora"],
+      "forbidden_claims": ["send the exported keys to support"]
+    },
+    {
+      "id": "o031",
+      "question": "Can Olympus Ask AI place an order without me confirming it?",
+      "expected_action": "answer",
+      "product": "olympus",
+      "intent": "orders",
+      "risk": "high",
+      "required_fact_ids": ["olympus.assistant.confirmation"],
+      "forbidden_claims": ["Ask AI places orders automatically"]
+    },
+    {
+      "id": "o032",
+      "question": "What happens after Olympus Ask AI proposes a trade?",
+      "expected_action": "answer",
+      "product": "olympus",
+      "intent": "orders",
+      "risk": "high",
+      "required_fact_ids": ["olympus.assistant.confirmation"],
+      "forbidden_claims": ["the trade is placed immediately"]
+    },
+    {
+      "id": "o033",
+      "question": "What exactly is an Olympus combo?",
+      "expected_action": "answer",
+      "product": "olympus",
+      "intent": "overview",
+      "risk": "high",
+      "required_fact_ids": ["olympus.combos.multi_leg"],
+      "forbidden_claims": ["a combo is just a basket of independent trades"]
+    },
+    {
+      "id": "o034",
+      "question": "Do all legs of a combo need to settle for it to pay?",
+      "expected_action": "answer",
+      "product": "olympus",
+      "intent": "overview",
+      "risk": "high",
+      "required_fact_ids": ["olympus.combos.multi_leg"],
+      "forbidden_claims": ["one winning leg is enough"]
+    },
+    {
+      "id": "o035",
+      "question": "What are Olympus perps and what do they settle in?",
+      "expected_action": "answer",
+      "product": "olympus",
+      "intent": "leverage",
+      "risk": "high",
+      "required_fact_ids": ["olympus.perps.scope"],
+      "forbidden_claims": ["perps have a fixed expiry date"]
+    },
+    {
+      "id": "o036",
+      "question": "Which instruments are supported by Olympus perps?",
+      "expected_action": "answer",
+      "product": "olympus",
+      "intent": "leverage",
+      "risk": "high",
+      "required_fact_ids": ["olympus.perps.scope"],
+      "forbidden_claims": []
+    },
+    {
+      "id": "o037",
+      "question": "Which Perps Automation strategies actually execute?",
+      "expected_action": "answer",
+      "product": "olympus",
+      "intent": "leverage",
+      "risk": "high",
+      "required_fact_ids": ["olympus.perps.automation.rules"],
+      "forbidden_claims": ["MACD rules definitely execute"]
+    },
+    {
+      "id": "o038",
+      "question": "Why did my Olympus MACD automation rule never fire?",
+      "expected_action": "answer",
+      "product": "olympus",
+      "intent": "leverage",
+      "risk": "high",
+      "required_fact_ids": ["olympus.perps.automation.rules"],
+      "forbidden_claims": ["MACD automation is fully implemented"]
+    },
+    {
+      "id": "o039",
+      "question": "Can Perps Automation trigger if I already have a position open on that instrument?",
+      "expected_action": "answer",
+      "product": "olympus",
+      "intent": "leverage",
+      "risk": "high",
+      "required_fact_ids": ["olympus.perps.automation.position_gate"],
+      "forbidden_claims": ["it always opens another position"]
+    },
+    {
+      "id": "o040",
+      "question": "Can I have a long and short automation rule for the same Olympus perp?",
+      "expected_action": "answer",
+      "product": "olympus",
+      "intent": "leverage",
+      "risk": "high",
+      "required_fact_ids": ["olympus.perps.automation.position_gate"],
+      "forbidden_claims": ["long and short rules can always coexist"]
+    },
+    {
+      "id": "o041",
+      "question": "What does in-play delay mean for a live sports order?",
+      "expected_action": "answer",
+      "product": "olympus",
+      "intent": "orders",
+      "risk": "medium",
+      "required_fact_ids": ["olympus.orders.in_play_delay"],
+      "forbidden_claims": ["Olympus controls the venue delay"]
+    },
+    {
+      "id": "o042",
+      "question": "Why might an in-play sports order be treated as rejected?",
+      "expected_action": "answer",
+      "product": "olympus",
+      "intent": "orders",
+      "risk": "medium",
+      "required_fact_ids": ["olympus.orders.in_play_delay"],
+      "forbidden_claims": ["every rejection is caused by in-play delay"]
+    },
+    {
+      "id": "o043",
+      "question": "What is a Maker Copy-Buy?",
+      "expected_action": "answer",
+      "product": "olympus",
+      "intent": "orders",
+      "risk": "high",
+      "required_fact_ids": ["olympus.orders.maker_copy_buy"],
+      "forbidden_claims": ["maker orders always fill"]
+    },
+    {
+      "id": "o044",
+      "question": "Can a Maker Copy-Buy remain unfilled even though it avoids taker fees?",
+      "expected_action": "answer",
+      "product": "olympus",
+      "intent": "orders",
+      "risk": "high",
+      "required_fact_ids": ["olympus.orders.maker_copy_buy"],
+      "forbidden_claims": ["avoiding taker fees guarantees a fill"]
+    },
+    {
+      "id": "o045",
+      "question": "Are Olympus copy fees collected next to each individual fill?",
+      "expected_action": "answer",
+      "product": "olympus",
+      "intent": "fees",
+      "risk": "high",
+      "required_fact_ids": ["olympus.fees.collection"],
+      "forbidden_claims": ["Olympus has no copy-trade fees"]
+    },
+    {
+      "id": "o046",
+      "question": "What deposit qualifies for the Olympus welcome bonus?",
+      "expected_action": "answer",
+      "product": "olympus",
+      "intent": "onboarding",
+      "risk": "high",
+      "required_fact_ids": ["olympus.welcome_bonus.referral_commission"],
+      "forbidden_claims": ["the bonus is a zero-fee trading period"]
+    },
+    {
+      "id": "o047",
+      "question": "What is the difference between an Olympus Orphan and a Stray?",
+      "expected_action": "answer",
+      "product": "olympus",
+      "intent": "copy_trading",
+      "risk": "high",
+      "required_fact_ids": ["olympus.failsafe.orphan_stray"],
+      "forbidden_claims": ["Orphan and Stray mean exactly the same thing"]
+    },
+    {
+      "id": "o048",
+      "question": "How does the Olympus failsafe identify an orphaned holding?",
+      "expected_action": "answer",
+      "product": "olympus",
+      "intent": "copy_trading",
+      "risk": "high",
+      "required_fact_ids": ["olympus.failsafe.orphan_stray"],
+      "forbidden_claims": ["the bot can confirm my specific funds are safe"]
     }
   ]
 }

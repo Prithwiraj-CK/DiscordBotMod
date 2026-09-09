@@ -14,7 +14,7 @@ Discord history, secrets, wallet keys, user exports, or database dumps here.
 One `.md` per project. `valhalla.md` and `olympus.md` go here.
 
 Every file in this folder is concatenated into the system prompt on every
-question, so keep each one tight — roughly a page. Prefer the things users
+question, so keep each one tight — roughly one or two pages. Prefer the things users
 actually ask about over exhaustive internal detail:
 
 - what the project is, in two lines

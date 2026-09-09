@@ -98,6 +98,16 @@ def retrieve_facts(query: str, product: str | None = None,
         r"\b(find|choose|select)\b.*\b(wallet|trader)\b.*\b(copy|follow)\b", query_lower,
     ):
         related_ids.add("olympus.performance.no_guarantee")
+    if product == "valhalla" and re.search(
+        r"\b(find|where|which)\b.*\b(wallets?|traders?)\b.*\b(follow|copy)\b",
+        query_lower,
+    ):
+        related_ids.add("valhalla.performance.no_guarantee")
+    if product == "valhalla" and re.search(
+        r"\bpnl\b.*\b(different|mismatch|wrong)\b|\b(different|mismatch|wrong)\b.*\bpnl\b",
+        query_lower,
+    ):
+        related_ids.add("valhalla.copy_trade.skip_reasons")
     if product == "olympus" and any(marker in query_lower for marker in ("slippage", "left over", "skipped sell", "leader sell")):
         related_ids.update({"olympus.copy_trade.execution_discrepancy", "olympus.copy_trade.behavior"})
     if product == "olympus" and re.search(r"private key|seed phrase|mnemonic", query_lower):
@@ -113,6 +123,14 @@ def retrieve_facts(query: str, product: str | None = None,
     if product == "valhalla" and len(re.findall(r"\b\d+(?:\.\d+)?\s*sol\b", query_lower)) >= 2:
         for fact in product_facts:
             if fact.get("id") in {"valhalla.copy_trade.ratio", "valhalla.performance.no_guarantee"} and fact not in candidates:
+                candidates.append(fact)
+    if product == "valhalla" and "filter" in query_lower:
+        for fact in product_facts:
+            if fact.get("id") == "valhalla.copy_trade.filters" and fact not in candidates:
+                candidates.append(fact)
+    if product == "valhalla" and re.search(r"read.?only|untracked", query_lower):
+        for fact in product_facts:
+            if fact.get("id") == "valhalla.positions.untracked_read_only" and fact not in candidates:
                 candidates.append(fact)
     scored = []
     for fact in candidates:
