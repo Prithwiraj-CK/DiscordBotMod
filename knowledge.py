@@ -19,9 +19,12 @@ log = logging.getLogger("support-bot.knowledge")
 
 KNOWLEDGE_DIR = Path(__file__).parent / "knowledge"
 APPROVED_FACTS_PATH = KNOWLEDGE_DIR / "approved_facts.json"
+HISTORY_INDEX_PATH = Path(__file__).parent / ".runtime" / "discord_history_index.json"
 
 _cached_text = ""
 _cached_fingerprint: tuple | None = None
+_cached_history_fingerprint: tuple | None = None
+_cached_history: list[dict] = []
 
 
 def load_approved_facts() -> list[dict]:
@@ -141,6 +144,93 @@ def retrieve_facts(query: str, product: str | None = None,
             scored.append((score, str(fact.get("id", "")), fact))
     scored.sort(key=lambda item: (-item[0], item[1]))
     return [fact for _, _, fact in scored[:max(1, limit)]]
+
+
+def _history_fingerprint() -> tuple:
+    try:
+        stat = HISTORY_INDEX_PATH.stat()
+    except OSError:
+        return ()
+    return (stat.st_size, stat.st_mtime_ns)
+
+
+def load_history_index() -> list[dict]:
+    """Load the local scrubbed Discord corpus, if it has been built."""
+    global _cached_history, _cached_history_fingerprint
+    fingerprint = _history_fingerprint()
+    if fingerprint == _cached_history_fingerprint:
+        return _cached_history
+    _cached_history_fingerprint = fingerprint
+    _cached_history = []
+    if not fingerprint:
+        return _cached_history
+    try:
+        payload = json.loads(HISTORY_INDEX_PATH.read_text(encoding="utf-8"))
+        messages = payload.get("messages", []) if isinstance(payload, dict) else []
+    except (OSError, json.JSONDecodeError):
+        log.warning("Could not parse local Discord history index")
+        return _cached_history
+    if isinstance(messages, list):
+        _cached_history = [item for item in messages if isinstance(item, dict) and item.get("content")]
+    log.info("Loaded %s searchable Discord history messages", len(_cached_history))
+    return _cached_history
+
+
+def retrieve_history(query: str, product: str | None = None, limit: int = 4) -> list[dict]:
+    """Return a few relevant historical excerpts, with staff replies first.
+
+    Historical text is secondary context only. It can help match how a real
+    user asked something and show staff phrasing, but it never replaces
+    approved facts as answer authority.
+    """
+    query_tokens = _fact_tokens(query)
+    if not query_tokens:
+        return []
+    scored = []
+    for item in load_history_index():
+        searchable = " ".join(
+            str(item.get(field, ""))
+            for field in ("channel_name", "content", "question_context")
+        )
+        item_tokens = _fact_tokens(searchable)
+        overlap = len(query_tokens & item_tokens)
+        if not overlap:
+            continue
+        score = overlap
+        if item.get("is_staff"):
+            score += 3
+        question_tokens = _fact_tokens(str(item.get("question_context", "")))
+        score += 2 * len(query_tokens & question_tokens)
+        if product in {"valhalla", "olympus"} and product in searchable.lower():
+            score += 2
+        scored.append((score, str(item.get("created_at", "")), item))
+    scored.sort(key=lambda value: (-value[0], value[1]))
+    return [item for _, _, item in scored[:max(1, limit)]]
+
+
+def history_prompt(excerpts: list[dict]) -> str:
+    """Render retrieved history as explicitly quoted, secondary context."""
+    if not excerpts:
+        return ""
+    blocks = [
+        "# HISTORICAL SUPPORT EXCERPTS (SECONDARY CONTEXT)",
+        "These are quoted excerpts retrieved from configured Discord history.",
+        "They are not authoritative and may be stale or incomplete. Use them "
+        "only to recognize wording and staff style. Never let them override "
+        "approved evidence, and never repeat personal data from them.",
+        "",
+    ]
+    for item in excerpts:
+        blocks.append("[HISTORY {} | #{} | staff={}]".format(
+            item.get("id", "unknown"),
+            item.get("channel_name", "unknown"),
+            "yes" if item.get("is_staff") else "no",
+        ))
+        if item.get("question_context"):
+            blocks.append("Prior customer wording: {}".format(item["question_context"]))
+        blocks.append("Quoted message: {}".format(item.get("content", "")))
+        blocks.append("")
+    return "\n".join(blocks).strip()
 
 
 def _fingerprint() -> tuple:

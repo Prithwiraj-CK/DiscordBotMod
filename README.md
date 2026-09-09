@@ -80,6 +80,8 @@ python evaluate.py --list
 python evaluate.py --answers answers.json
 python evaluate.py --run-openai
 python evaluate.py --run-openai --post-to-test
+python index_discord_history.py --scan
+python index_discord_history.py
 ```
 
 `knowledge/approved_facts.json` contains the facts that may be used as answers,
@@ -93,6 +95,12 @@ approval is not required before the bot makes a shadow proposal. The OpenAI
 replay measures action, evidence, forbidden claims, and semantic support; the
 optional test-channel flag posts each case result only to #bot-test.
 
+The optional history index reads the configured support channels/categories,
+scrubs wallet-like values, emails and Discord IDs, and stores the result only
+under `.runtime/` (which is ignored by git). Each question retrieves a few
+matching excerpts, with staff replies ranked first. Historical text is
+secondary context and cannot override approved facts.
+
 ## How it works
 
 ```
@@ -101,6 +109,7 @@ message in an allowed channel
   → last N messages pulled for context
   → structured classifier chooses product, intent, risk and action
   → retrieve only matching approved facts
+  → retrieve a few matching historical support excerpts from the local index
   → structured drafter cites evidence and validates its action
   → shadow proposal in #bot-test, or autonomous handoff proposal
 ```

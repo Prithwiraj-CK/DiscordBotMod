@@ -41,7 +41,7 @@ import requests
 from dotenv import load_dotenv
 
 from alerts import alert
-from knowledge import load_knowledge, retrieve_facts
+from knowledge import history_prompt, load_knowledge, retrieve_facts, retrieve_history
 from llm import ask_json
 
 load_dotenv()
@@ -133,8 +133,6 @@ ANSWER_ATTEMPTS = _env_int("ANSWER_ATTEMPTS", 3)
 # of the reply and capped hard: a typing dot sitting there is the tell.
 REPLY_DELAY_MIN_SECONDS = _env_float("REPLY_DELAY_MIN_SECONDS", 30)
 REPLY_DELAY_MAX_SECONDS = _env_float("REPLY_DELAY_MAX_SECONDS", 120)
-TYPING_MAX_SECONDS = _env_float("TYPING_MAX_SECONDS", 4)
-TYPING_CHARS_PER_SECOND = max(1.0, _env_float("TYPING_CHARS_PER_SECOND", 40))
 
 # Answers in flight at once. Small on purpose: a user account posting in
 # parallel across channels is exactly what automated-behaviour detection is
@@ -767,13 +765,6 @@ def _escalation_reply():
     return mention + choice
 
 
-def _typing_seconds(text):
-    """How long to show typing before sending. Short, and never fixed."""
-    seconds = len(text or "") / TYPING_CHARS_PER_SECOND
-    seconds = max(0.8, min(seconds, TYPING_MAX_SECONDS))
-    return seconds * random.uniform(0.85, 1.15)
-
-
 def _reply_delay_seconds():
     """How long before she answers. Random, and on a human scale."""
     low = max(0.0, min(REPLY_DELAY_MIN_SECONDS, REPLY_DELAY_MAX_SECONDS))
@@ -1050,10 +1041,12 @@ def autonomous_decision(query, turns, product_hint=None):
     if product_hint in {"valhalla", "olympus"}:
         product = product_hint
     facts = retrieve_facts(query, product=product, intent=intent, limit=6)
+    historical_excerpts = retrieve_history(query, product=product, limit=4)
     fact_ids = {str(fact.get("id", "")) for fact in facts}
     log.info(
-        "Autonomous route action=%s product=%s intent=%s risk=%s confidence=%.2f evidence=%s",
-        action, product, intent, route.get("risk"), route.get("confidence", 0), sorted(fact_ids),
+        "Autonomous route action=%s product=%s intent=%s risk=%s confidence=%.2f evidence=%s history=%s",
+        action, product, intent, route.get("risk"), route.get("confidence", 0),
+        sorted(fact_ids), len(historical_excerpts),
     )
 
     hinted_action = _action_hint(query, product, intent)
@@ -1110,6 +1103,8 @@ def autonomous_decision(query, turns, product_hint=None):
         .format(action, intent, product)
         + _evidence_text(facts)
     )
+    if historical_excerpts:
+        draft_prompt += "\n\n" + history_prompt(historical_excerpts)
     draft = ask_json(
         draft_prompt,
         turns,
@@ -1279,11 +1274,6 @@ def _answer(message):
         if repeated:
             log.info("Message %s repeats an earlier question, answering fresh", message_id)
 
-        try:
-            _bot.typingAction(channel_id)   # best effort, never worth failing over
-        except Exception:
-            pass
-
         answer = _autonomous_response(readable, turns)
     except Exception as exc:
         log.exception("Failed to answer message %s", message_id)
@@ -1342,13 +1332,9 @@ def _answer(message):
         # seconds. "Typing" for the whole delay is what made her look like a
         # machine reacting to every message in the channel.
         delay = _reply_delay_seconds()
-        lead = min(_typing_seconds(body), delay)
+        lead = 0
         if _stop.wait(delay - lead):
             return
-        try:
-            _bot.typingAction(OUTPUT_CHANNEL_ID)
-        except Exception:
-            pass
         if _stop.wait(lead):
             return
 
