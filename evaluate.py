@@ -227,12 +227,25 @@ def _post_test_result(token: str, case: dict[str, Any], answer: dict[str, Any]) 
         evidence=evidence[:600],
         unsupported=unsupported[:500],
     )
-    response = requests.post(
-        "https://discord.com/api/v9/channels/1546057978921095178/messages",
-        headers={"Authorization": token, "Content-Type": "application/json"},
-        json={"content": body[:2000], "allowed_mentions": {"parse": []}},
-        timeout=20,
-    )
+    url = "https://discord.com/api/v9/channels/1546057978921095178/messages"
+    headers = {"Authorization": token, "Content-Type": "application/json"}
+    payload = {"content": body[:2000], "allowed_mentions": {"parse": []}}
+    response = requests.post(url, headers=headers, json=payload, timeout=20)
+    if response.status_code == 400:
+        try:
+            blocked = response.json().get("code") == 200000
+        except ValueError:
+            blocked = False
+        if blocked:
+            # AutoMod blocks some external links in this transcript channel.
+            # Keep the answer text intact in the replay output, but redact URLs
+            # in the Discord-only copy so every case can still be reviewed.
+            safe_body = re.sub(r"https?://\S+", "[official link redacted in test transcript]", body)
+            response = requests.post(
+                url, headers=headers,
+                json={"content": safe_body[:2000], "allowed_mentions": {"parse": []}},
+                timeout=20,
+            )
     if response.status_code not in (200, 201):
         detail = response.text.replace("\n", " ")[:500]
         raise ValueError(f"Discord test-channel post failed: HTTP {response.status_code}: {detail}")
