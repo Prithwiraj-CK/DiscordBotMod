@@ -966,6 +966,16 @@
         "valhalla.wallets.positions_on_meteora"
       ],
       "forbidden_claims": ["Phantom is required to start copy trading", "setting Jup Score to 0 is completely safe"]
+    },
+    {
+      "id": "v045",
+      "question": "Is there a video on how to best set up the Valhalla bot?",
+      "expected_action": "answer",
+      "product": "valhalla",
+      "intent": "onboarding",
+      "risk": "low",
+      "required_fact_ids": ["valhalla.onboarding.best_setup_walkthrough"],
+      "forbidden_claims": ["this video is official", "this setup guarantees profit"]
     }
   ]
 }

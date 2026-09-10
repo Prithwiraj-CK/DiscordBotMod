@@ -34,6 +34,20 @@
       "approved": true
     },
     {
+      "id": "valhalla.onboarding.best_setup_walkthrough",
+      "product": "valhalla",
+      "topic": "onboarding",
+      "action": "answer",
+      "fact": "The official Valhalla Getting Started guide (https://valhalla-bot.gitbook.io/valhalla-bot/getting-started) is the approved setup walkthrough: run /valhalla start, then /valhalla settings_dlmm, choose Follow Wallet, and select Turn On. The same setup is available from the Valhalla website at https://valhalla-bot.app/.",
+      "answer_guidance": "If someone asks for a setup video or tutorial and no verified video link is available, say that you do not have a verified Valhalla video link to share and give this official guide and setup flow instead. Do not invent or guess a video URL.",
+      "retrieval_terms": ["video", "tutorial", "walkthrough", "getting started", "best setup", "best set up", "setup guide", "how to set up", "configure"],
+      "source": {"kind": "official_product_docs", "ref": "https://valhalla-bot.gitbook.io/valhalla-bot/getting-started"},
+      "last_verified": "2026-09-10",
+      "risk": "low",
+      "links": ["https://valhalla-bot.gitbook.io/valhalla-bot/getting-started", "https://valhalla-bot.app/"],
+      "approved": true
+    },
+    {
       "id": "valhalla.fees.link",
       "product": "valhalla",
       "topic": "fees",

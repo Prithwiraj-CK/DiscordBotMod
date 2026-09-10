@@ -54,6 +54,11 @@ can promise what any one person will make.
 There is **no API key of any kind** to set up. Older guides mentioning a Shyft
 key are out of date; do not send users to shyft.to.
 
+If someone asks for a setup video, use the official Getting Started guide as
+the verified walkthrough. Do not invent or guess a video URL. If no approved
+video link is available, say so briefly and give the setup flow above: start
+Valhalla, open the DLMM settings, choose Follow Wallet, and Turn On.
+
 Keys should be written down physically, never saved online.
 
 ## Commands
