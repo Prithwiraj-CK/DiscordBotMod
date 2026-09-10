@@ -1072,7 +1072,7 @@ def _claim_is_in_evidence(claim, facts):
     return bool(normalized_claim) and normalized_claim in normalized_evidence
 
 
-def autonomous_decision(query, turns, product_hint=None):
+def autonomous_decision(query, turns, product_hint=None, force_reply=False):
     """Return the autonomous routing decision and its validation metadata."""
     classifier_input = query
     if product_hint in {"valhalla", "olympus"}:
@@ -1097,16 +1097,9 @@ def autonomous_decision(query, turns, product_hint=None):
     facts = retrieve_facts(query, product=product, intent=intent, limit=6)
     historical_excerpts = retrieve_history(query, product=product, limit=4)
     fact_ids = {str(fact.get("id", "")) for fact in facts}
-    log.info(
-        "Autonomous route action=%s product=%s intent=%s risk=%s confidence=%.2f evidence=%s history=%s",
-        action, product, intent, route.get("risk"), route.get("confidence", 0),
-        sorted(fact_ids), len(historical_excerpts),
-    )
-
     hinted_action = _action_hint(query, product, intent)
     if hinted_action:
         action = hinted_action
-
     # Deterministic safety gates override a model choice for high-risk text.
     if (_MUST_ESCALATE_RE.search(query) or _SECURITY_RE.search(query)) and not _SAFE_SETUP_SECURITY_RE.search(query):
         return {
@@ -1118,8 +1111,17 @@ def autonomous_decision(query, turns, product_hint=None):
     # A message that reaches this function has already passed the channel and
     # addressing filters. Direct questions should not be silently ignored just
     # because the classifier is uncertain; answer from evidence or clarify.
-    if action == "ignore" and _asks_something(query) and intent not in {"social", "addressed_to_staff"}:
+    if force_reply and action == "ignore":
+        # A direct mention or reply is an explicit request for a response,
+        # even when the text is only a greeting or a one-word follow-up.
+        action = "answer"
+    elif action == "ignore" and _asks_something(query) and intent not in {"social", "addressed_to_staff"}:
         action = "answer" if facts else "clarify"
+    log.info(
+        "Autonomous route action=%s product=%s intent=%s risk=%s confidence=%.2f evidence=%s history=%s",
+        action, product, intent, route.get("risk"), route.get("confidence", 0),
+        sorted(fact_ids), len(historical_excerpts),
+    )
     if action == "ignore":
         return {
             "action": "ignore", "product": product, "intent": intent,
@@ -1177,6 +1179,14 @@ def autonomous_decision(query, turns, product_hint=None):
         draft["draft_answer"] = _fallback_clarification(query)
         draft["evidence_ids"] = sorted(fact_ids)
     used_ids = {str(value) for value in draft.get("evidence_ids", [])}
+    if force_reply and draft_action not in {"answer", "clarify"}:
+        draft_action = "answer"
+        draft["draft_answer"] = (
+            "Hi! What can I help you with?"
+            if intent == "social" or not (query or "").strip()
+            else "Got it. What specific product question should I help with?"
+        )
+        draft["evidence_ids"] = []
     if draft_action not in {"answer", "clarify"}:
         effective_action = "escalate" if draft_action == "escalate" else "ignore"
         return {
@@ -1269,9 +1279,11 @@ def autonomous_decision(query, turns, product_hint=None):
     }
 
 
-def _autonomous_response(query, turns, product_hint=None):
+def _autonomous_response(query, turns, product_hint=None, force_reply=False):
     """Return the validated autonomous response text."""
-    return autonomous_decision(query, turns, product_hint=product_hint).get("draft_answer", ESCALATE)
+    return autonomous_decision(
+        query, turns, product_hint=product_hint, force_reply=force_reply,
+    ).get("draft_answer", ESCALATE)
 
 
 def _recent_context(channel_id, before_id):
@@ -1328,7 +1340,9 @@ def _answer(message):
         if repeated:
             log.info("Message %s repeats an earlier question, answering fresh", message_id)
 
-        answer = _autonomous_response(readable, turns)
+        answer = _autonomous_response(
+            readable, turns, force_reply=_directly_addressed(message),
+        )
     except Exception as exc:
         log.exception("Failed to answer message %s", message_id)
         _record_failure(message_id, channel_id, "{}: {}".format(type(exc).__name__, exc))
@@ -1486,6 +1500,20 @@ def _wants_reply(message):
         return False
 
     return _asks_something(text)
+
+
+def _directly_addressed(message):
+    """Whether a message explicitly addresses Salena by tag or reply."""
+    text = message.get("content") or ""
+    tagged_self = any(
+        str(mention.get("id", "")) == _self_id
+        for mention in (message.get("mentions") or [])
+    )
+    if _self_id and re.search(r"<@!?{}>".format(_self_id), text):
+        tagged_self = True
+    referenced = message.get("referenced_message") or {}
+    replied_author = str((referenced.get("author") or {}).get("id", "")) if referenced else ""
+    return bool(tagged_self or (replied_author and replied_author == _self_id))
 
 
 def _should_answer(message):
