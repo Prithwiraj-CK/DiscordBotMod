@@ -195,6 +195,19 @@
       "approved": true
     },
     {
+      "id": "valhalla.settings.jup_score_zero",
+      "product": "valhalla",
+      "topic": "risk_controls",
+      "action": "answer",
+      "fact": "To set the minimum Jupiter score to 0, open Wallet Settings → Advanced Settings → Filters in Valhalla, then set Min Jup Score to 0. The same setting is available from the Valhalla website as well as the Discord settings flow.",
+      "answer_guidance": "Give the exact navigation path when asked about Jup 0. Do not describe disabling the score as a safety guarantee or recommend bypassing other safety restrictions.",
+      "retrieval_terms": ["jup 0", "jupiter score 0", "min jup score", "minimum jupiter score", "wallet settings", "advanced settings", "filters", "website"],
+      "source": {"kind": "product_owner_clarification", "ref": "user clarification 2026-09-10; verified Valhalla settings UI path"},
+      "last_verified": "2026-09-10",
+      "risk": "high",
+      "approved": true
+    },
+    {
       "id": "valhalla.security.credentials",
       "product": "valhalla",
       "topic": "security",

@@ -211,6 +211,11 @@ stop-loss, position-count and timeframe limits, plus minimum token age,
 market-cap, holder-count, and trade-volume filters. Answer only the filter
 asked about. Values are configuration choices, not promises of performance.
 
+**How do I set Jup Score to 0?** Open Wallet Settings → Advanced Settings →
+Filters and set **Min Jup Score** to 0. The same setting is available in the
+Valhalla website settings as well as the Discord settings flow. This does not
+make trading safe or override other safety restrictions.
+
 **What does not copy?** General exclusions include adds to an existing
 position, claims below $2, manually opened DLMM positions, activity beyond the
 50-position cap, and unsupported pool assets. If someone reports a specific

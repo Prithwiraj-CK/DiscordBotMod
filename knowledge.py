@@ -152,6 +152,13 @@ def retrieve_facts(query: str, product: str | None = None,
         for fact in product_facts:
             if fact.get("id") == "valhalla.positions.untracked_read_only" and fact not in candidates:
                 candidates.append(fact)
+    if product == "valhalla" and re.search(r"\bjup(?:iter)?\b", query_lower) and re.search(
+        r"\b0\b|score|filter", query_lower,
+    ):
+        related_ids.update({"valhalla.settings.jup_safety", "valhalla.settings.jup_score_zero"})
+        for fact in product_facts:
+            if fact.get("id") in related_ids and fact not in candidates:
+                candidates.append(fact)
     scored = []
     for fact in candidates:
         retrieval_terms = {

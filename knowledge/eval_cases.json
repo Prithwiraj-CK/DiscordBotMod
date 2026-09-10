@@ -942,6 +942,16 @@
       "risk": "high",
       "required_fact_ids": ["valhalla.copy_trade.ratio"],
       "forbidden_claims": ["this ratio is safe", "guaranteed profit", "you should risk exactly 10%"]
+    },
+    {
+      "id": "v043",
+      "question": "How do I set Jup 0 in Valhalla, and can I do it from the website?",
+      "expected_action": "answer",
+      "product": "valhalla",
+      "intent": "risk_controls",
+      "risk": "high",
+      "required_fact_ids": ["valhalla.settings.jup_score_zero"],
+      "forbidden_claims": ["setting Jup Score to 0 is completely safe", "it overrides every safety restriction"]
     }
   ]
 }

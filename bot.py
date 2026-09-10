@@ -998,6 +998,10 @@ def _action_hint(query, product, intent):
         lowered,
     ):
         return "answer"
+    if product == "valhalla" and re.search(r"\bjup(?:iter)?\b", lowered) and re.search(
+        r"\b0\b|score|filter", lowered,
+    ) and "my account" not in lowered:
+        return "answer"
     if product == "valhalla" and re.search(r"\b(?:dlmm\s+)?ratio\b", lowered):
         return "answer"
     if product == "valhalla" and re.search(
@@ -1104,6 +1108,8 @@ def _known_safe_answer(query, product, facts):
     fact_map = {str(fact.get("id")): fact for fact in facts}
 
     if product == "valhalla":
+        if re.search(r"\bjup(?:iter)?\b", lowered) and re.search(r"\b0\b|score|filter", lowered):
+            return fact_map.get("valhalla.settings.jup_score_zero", {}).get("fact", "")
         if re.search(r"\b(?:dlmm\s+)?ratio\b", lowered):
             ratio_fact = fact_map.get("valhalla.copy_trade.ratio", {}).get("fact", "")
             if ratio_fact:

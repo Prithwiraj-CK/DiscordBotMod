@@ -84,13 +84,13 @@ python index_discord_history.py --scan
 python index_discord_history.py
 ```
 
-`knowledge/approved_facts.json` contains the 50 facts that may be used as answers,
+`knowledge/approved_facts.json` contains the 51 facts that may be used as answers,
 their provenance, risk, and handling guidance. The Markdown one-pagers are
 supplemental notes. Product-owner clarifications, runtime behavior, and the
 official product documentation take precedence over older notes or examples.
 The evaluator checks schema, duplicate IDs, evidence references, and obvious
 secret-shaped content; it does not call Discord or OpenAI. The current
-regression set contains 94 cases. Routing and posting are autonomous; staff
+regression set contains 95 cases. Routing and posting are autonomous; staff
 approval is not required before the bot makes a shadow proposal. The OpenAI
 replay measures action, evidence, forbidden claims, and semantic support; the
 optional test-channel flag posts each case result only to #bot-test.
