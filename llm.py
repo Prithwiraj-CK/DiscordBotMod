@@ -92,8 +92,9 @@ def _get_client():
 def ask_llm(system_prompt, messages):
     """Send a conversation to the model and return its reply text.
 
-    messages is a list of {"role": "user"|"assistant", "content": str},
-    oldest first.
+    messages is a list of {"role": "user"|"assistant", "content": str}
+    entries. For vision calls, content may instead be the Chat Completions
+    list of text/image parts, oldest first.
 
     Raises LLMUnavailable when the model could not be reached. Callers must
     treat that as "no answer yet" rather than "no answer": a dropped question

@@ -99,7 +99,9 @@ The optional history index reads the configured support channels/categories,
 scrubs wallet-like values, emails and Discord IDs, and stores the result only
 under `.runtime/` (which is ignored by git). Each question retrieves a few
 matching excerpts, with staff replies ranked first. Historical text is
-secondary context and cannot override approved facts.
+secondary context and cannot override approved facts. Tagged messages with
+Discord image attachments receive a one-time vision transcription/summary;
+image text is untrusted context and cannot override approved facts.
 
 ## How it works
 
@@ -107,6 +109,7 @@ secondary context and cannot override approved facts.
 message in an allowed channel
   → gateway event (discum), dispatched to a worker thread
   → last N messages pulled for context
+  → tagged images transcribed once as untrusted context
   → structured classifier chooses product, intent, risk and action
   → retrieve only matching approved facts
   → retrieve a few matching historical support excerpts from the local index
