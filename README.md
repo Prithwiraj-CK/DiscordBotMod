@@ -103,6 +103,17 @@ secondary context and cannot override approved facts. Tagged messages with
 Discord image attachments receive a one-time vision transcription/summary;
 image text is untrusted context and cannot override approved facts.
 
+If `CODEBASE_VALHALLA_PATH` and `CODEBASE_OLYMPUS_PATH` are configured and
+`CODEBASE_SEARCH_ENABLED=true`, product and workflow questions also search those
+two repositories locally. This is a separate opt-in because the selected
+excerpts are sent to OpenAI as model context. The search is read-only and
+bounded: it uses fixed paths, fixed-string queries, excludes
+dependencies/generated files and secret-shaped files, redacts sensitive-looking
+values, and returns only short excerpts. The model has no shell or filesystem
+write tool. Code excerpts can explain exact implementation behavior, but
+approved facts remain authoritative for fees, security, account-specific
+support, privacy, and product promises. It is disabled by default.
+
 ## How it works
 
 ```
@@ -112,7 +123,7 @@ message in an allowed channel
   → tagged images transcribed once as untrusted context
   → structured classifier chooses product, intent, risk and action
   → compound questions get up to four focused evidence searches
-  → retrieve matching approved facts, Markdown notes, and historical excerpts
+  → retrieve matching approved facts, Markdown notes, historical excerpts, and safe code excerpts
   → structured drafter cites evidence and validates its action
   → shadow proposal in #bot-test, or autonomous handoff proposal
 ```
