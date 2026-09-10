@@ -42,7 +42,7 @@ import requests
 from dotenv import load_dotenv
 
 from alerts import alert
-from codebase_search import codebase_prompt, search_codebase
+from codebase_search import codebase_prompt, read_codebase_context, search_codebase
 from knowledge import (
     history_prompt, load_knowledge, notes_prompt, retrieve_facts,
     retrieve_history, retrieve_notes,
@@ -499,6 +499,34 @@ SEARCH_PLAN_SCHEMA = {
     "required": ["searches"],
 }
 
+EVIDENCE_REVIEW_SCHEMA = {
+    "type": "object",
+    "additionalProperties": False,
+    "properties": {
+        "needs_more_search": {"type": "boolean"},
+        "follow_up_searches": {
+            "type": "array",
+            "maxItems": 3,
+            "items": {
+                "type": "object",
+                "additionalProperties": False,
+                "properties": {
+                    "query": {"type": "string", "maxLength": 400},
+                    "product": {"type": "string", "enum": ["valhalla", "olympus", "generic", "unknown"]},
+                    "intent": {"type": "string", "enum": [
+                        "onboarding", "fees", "copy_trading", "settings", "risk_controls",
+                        "performance", "wallets", "orders", "sports", "leverage", "security",
+                        "support_triage", "overview", "social", "underspecified", "unknown",
+                    ]},
+                },
+                "required": ["query", "product", "intent"],
+            },
+        },
+        "read_evidence_ids": {"type": "array", "maxItems": 4, "items": {"type": "string"}},
+    },
+    "required": ["needs_more_search", "follow_up_searches", "read_evidence_ids"],
+}
+
 ROUTER_SYSTEM = """Classify the current Discord message for an autonomous product-support bot.
 Choose exactly one action:
 - answer: the approved knowledge clearly answers a general product question
@@ -562,6 +590,17 @@ wallets, and percentages, and use the best product and intent for each search.
 If the message is already one simple question, return one focused search.
 Never invent facts, commands, or settings that are not present in the user's
 message. This is query planning, not answering.
+"""
+
+EVIDENCE_REVIEW_SYSTEM = """Review the current evidence for the user's question before drafting.
+Do not answer the user. Decide whether one bounded follow-up research pass is
+needed. If evidence is incomplete or only matches a neighboring topic, return
+focused searches. You may request nearby lines only for evidence IDs already
+listed in the current evidence. Never request a path, shell command, secret,
+or arbitrary file. Product-owner clarifications and approved facts remain the
+authority for fees, security, account-specific issues, and product promises.
+Return no more than three follow-up searches and four existing evidence IDs to
+read in context.
 """
 
 IMAGE_CONTEXT_SCHEMA = {
@@ -1264,6 +1303,48 @@ def _plan_searches(query, product, intent):
     return searches[:4]
 
 
+def _review_evidence(query, product, intent, facts):
+    """Ask for one bounded follow-up pass when the first retrieval is weak."""
+    prompt = (
+        EVIDENCE_REVIEW_SYSTEM
+        + "\nCURRENT QUESTION: {}\nPRODUCT: {}\nINTENT: {}\n\n"
+        "CURRENT APPROVED EVIDENCE:\n{}"
+    ).format(query, product, intent, _evidence_text(facts))
+    try:
+        result = ask_json(
+            prompt,
+            [{"role": "user", "content": query}],
+            EVIDENCE_REVIEW_SCHEMA,
+            name="support_evidence_review",
+            temperature=0.0,
+        )
+    except Exception as exc:
+        log.warning("Evidence review unavailable; keeping initial retrieval: %s", exc)
+        return {"needs_more_search": False, "follow_up_searches": [], "read_evidence_ids": []}
+
+    searches = []
+    for item in result.get("follow_up_searches", []):
+        if not isinstance(item, dict):
+            continue
+        focused_query = str(item.get("query") or "").strip()
+        if not focused_query:
+            continue
+        planned_product = item.get("product")
+        if product in {"valhalla", "olympus"}:
+            planned_product = product
+        elif planned_product not in {"valhalla", "olympus", "generic", "unknown"}:
+            planned_product = product
+        planned_intent = item.get("intent")
+        if not isinstance(planned_intent, str):
+            planned_intent = intent
+        searches.append((focused_query[:400], planned_product, planned_intent))
+    return {
+        "needs_more_search": result.get("needs_more_search") is True,
+        "follow_up_searches": searches[:3],
+        "read_evidence_ids": [str(value) for value in result.get("read_evidence_ids", [])][:4],
+    }
+
+
 def _evidence_text(facts):
     blocks = []
     for fact in facts:
@@ -1293,6 +1374,16 @@ def _claim_is_in_evidence(claim, facts):
 
 def autonomous_decision(query, turns, product_hint=None, force_reply=False):
     """Return the autonomous routing decision and its validation metadata."""
+    # Small talk is deterministic and does not need product retrieval. Keeping
+    # it ahead of the model also makes a bad classifier impossible to turn a
+    # greeting into a product answer.
+    if force_reply and _is_social_smalltalk(query):
+        return {
+            "action": "answer", "product": product_hint or "generic", "intent": "social",
+            "risk": "low", "confidence": 1.0,
+            "evidence_ids": [], "missing_information": [],
+            "draft_answer": _social_reply(query), "unsupported_claims": [],
+        }
     classifier_input = query
     if product_hint in {"valhalla", "olympus"}:
         classifier_input = "Source-channel product context: {}\nCurrent message: {}".format(
@@ -1313,17 +1404,17 @@ def autonomous_decision(query, turns, product_hint=None, force_reply=False):
         intent = hinted_intent
     if product_hint in {"valhalla", "olympus"}:
         product = product_hint
+
     searches = [(query, product, intent)]
     searches.extend(_plan_searches(query, product, intent))
 
-    # Retrieve independently for the original question and each planned
-    # subquestion. A single wrong intent should not hide evidence for the
-    # other parts of a compound message.
     facts_by_id = OrderedDict()
     codebase_by_id = OrderedDict()
     notes_by_key = OrderedDict()
     history_by_key = OrderedDict()
-    for search_query, search_product, search_intent in searches:
+
+    def collect_search(search_query, search_product, search_intent):
+        """Collect one bounded search without letting the model choose paths."""
         for fact in retrieve_facts(
             search_query, product=search_product, intent=search_intent, limit=6,
         ):
@@ -1344,8 +1435,51 @@ def autonomous_decision(query, turns, product_hint=None, force_reply=False):
             notes_by_key[(note.get("source", ""), note.get("text", ""))] = note
         for excerpt in retrieve_history(search_query, product=search_product, limit=4):
             history_by_key[str(excerpt.get("id", ""))] = excerpt
+
+    # Retrieve independently for the original question and each planned
+    # subquestion. A single wrong intent should not hide evidence for the
+    # other parts of a compound message.
+    for search_query, search_product, search_intent in searches:
+        collect_search(search_query, search_product, search_intent)
+
+    # Give the evidence a single bounded review pass. This lets her notice
+    # that the first hit answered a neighboring topic, then search a focused
+    # phrase or read nearby lines from an already matched safe file. The
+    # review is deliberately skipped for greetings, account/security issues,
+    # and discrepancy reports, where guessing is more harmful than handoff.
+    review_allowed = (
+        CODEBASE_SEARCH_ENABLED
+        and product in {"valhalla", "olympus"}
+        and intent not in {"social", "addressed_to_staff"}
+        and (action != "ignore" or force_reply)
+        and not _SECURITY_RE.search(query)
+        and not _DISCREPANCY_RE.search(query)
+    )
+    if review_allowed:
+        preliminary = list(facts_by_id.values())[:10] + list(codebase_by_id.values())[:8]
+        review = _review_evidence(query, product, intent, preliminary)
+        if review["needs_more_search"]:
+            for search_query, search_product, search_intent in review["follow_up_searches"]:
+                collect_search(search_query, search_product, search_intent)
+        for evidence_id in review["read_evidence_ids"]:
+            excerpt = codebase_by_id.get(evidence_id)
+            if not excerpt or excerpt.get("source_type") != "codebase":
+                continue
+            context = read_codebase_context(
+                product,
+                excerpt.get("path", ""),
+                excerpt.get("line", 0),
+                radius=3,
+            )
+            if context:
+                codebase_by_id[str(context["id"])] = context
+
     facts = list(facts_by_id.values())[:10]
-    codebase_excerpts = list(codebase_by_id.values())[:8]
+    codebase_items = list(codebase_by_id.values())
+    # Nearby context is more useful than another isolated matching line.
+    context_items = [item for item in codebase_items if item.get("source_type") == "codebase_context"]
+    line_items = [item for item in codebase_items if item.get("source_type") != "codebase_context"]
+    codebase_excerpts = (context_items + line_items)[:8]
     facts.extend(codebase_excerpts)
     note_excerpts = list(notes_by_key.values())[:6]
     historical_excerpts = list(history_by_key.values())[:6]
@@ -1566,6 +1700,10 @@ def _autonomous_response(query, turns, product_hint=None, force_reply=False):
 
 def _recent_context(channel_id, before_id):
     """Last few messages in the channel, oldest first, as model turns."""
+    # #bot-test is a generated transcript channel. Its shadow proposals are
+    # never valid conversation context for a new question.
+    if str(channel_id) == OUTPUT_CHANNEL_ID:
+        return []
     response = _call(
         "history for channel {}".format(channel_id),
         _bot.getMessages, channel_id, num=CONTEXT_MESSAGES, beforeDate=before_id,
@@ -1739,6 +1877,26 @@ def _answer_safely(message):
 # before looking for one.
 _URL_RE = re.compile(r"https?://\S+|www\.\S+", re.IGNORECASE)
 _CODE_RE = re.compile(r"```.*?```|`[^`]*`", re.DOTALL)
+_SOCIAL_SMALLTALK_RE = re.compile(
+    r"^(?:@?salena\s+)?(?:hi|hello|hey|yo|gm|good morning|"
+    r"how are you(?: doing)?|how r u|how's it going|what's up|sup|"
+    r"thanks|thank you)[!.?\s]*$",
+    re.IGNORECASE,
+)
+
+
+def _is_social_smalltalk(text):
+    stripped = _URL_RE.sub(" ", _CODE_RE.sub(" ", text or ""))
+    return bool(_SOCIAL_SMALLTALK_RE.match(" ".join(stripped.split())))
+
+
+def _social_reply(text):
+    lowered = (text or "").lower()
+    if "how are" in lowered or "how r u" in lowered or "how's it going" in lowered:
+        return "good haha, how are you?"
+    if "thank" in lowered:
+        return "of course haha"
+    return "hey haha, what's up?"
 
 
 def _asks_something(text):
