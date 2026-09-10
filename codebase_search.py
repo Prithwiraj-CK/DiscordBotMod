@@ -21,6 +21,8 @@ _STOPWORDS = {
     "about", "after", "also", "and", "are", "can", "does", "for", "from",
     "how", "into", "is", "it", "its", "not", "or", "that", "the", "then",
     "this", "to", "what", "when", "where", "which", "with", "you", "your",
+    "component", "configured", "current", "field", "implementation", "internal",
+    "setting", "settings", "validates", "validation",
 }
 _TOKEN_RE = re.compile(r"[a-zA-Z][a-zA-Z0-9_/-]{2,}")
 _SENSITIVE_LINE_RE = re.compile(
@@ -41,6 +43,11 @@ _EXCLUDED_GLOBS = (
     "!build/**",
     "!coverage/**",
     "!vendor/**",
+    "!logs/**",
+    "!output/**",
+    "!tmp/**",
+    "!backup/**",
+    "!backups/**",
     "!*.lock",
     "!package-lock.json",
     "!bun.lock",
@@ -48,6 +55,8 @@ _EXCLUDED_GLOBS = (
     "!.env.*",
     "!*secret*",
     "!*credential*",
+    "!*log*",
+    "!*dump*",
     "!*private*",
     "!*.pem",
     "!*.key",
@@ -94,8 +103,16 @@ def _queries(query: str) -> list[str]:
         searches.append(clean)
     if len(unique) >= 2:
         searches.extend(" ".join(unique[index:index + 2]) for index in range(len(unique) - 1))
-    searches.extend(unique[:5])
-    return list(dict.fromkeys(searches))[:7]
+    return list(dict.fromkeys(searches))[:8]
+
+
+def _single_token_queries(query: str) -> list[str]:
+    clean = re.sub(r"\[ATTACHED IMAGE CONTEXT.*?\]", " ", query or "", flags=re.S)
+    tokens = [
+        token.lower() for token in _TOKEN_RE.findall(clean)
+        if token.lower() not in _STOPWORDS and len(token) > 3
+    ]
+    return list(dict.fromkeys(tokens))[:5]
 
 
 def _redact(line: str) -> str | None:
@@ -113,59 +130,67 @@ def search_codebase(query: str, product: str | None, limit: int = 8) -> list[dic
 
     results: list[dict] = []
     seen: set[str] = set()
-    for pattern in _queries(query):
-        if len(results) >= max(1, limit):
-            break
-        args = [
-            rg, "-n", "--no-heading", "--color", "never", "--fixed-strings",
-            "--ignore-case",
-            "--no-follow", "--max-count", "8", "--max-filesize", "1M",
-        ]
-        for glob in _EXCLUDED_GLOBS:
-            args.extend(["--glob", glob])
-        args.extend([pattern, str(root)])
-        try:
-            completed = subprocess.run(
-                args,
-                capture_output=True,
-                text=True,
-                timeout=1.5,
-                check=False,
-            )
-        except (OSError, subprocess.TimeoutExpired) as exc:
-            log.warning("Codebase search failed for %s: %s", root.name, exc)
-            break
-        if completed.returncode not in (0, 1):
-            log.warning("Codebase search returned rg status %s", completed.returncode)
-            break
-        for raw_line in completed.stdout.splitlines():
-            match = re.match(r"^(.*?):(\d+):(.*)$", raw_line)
-            if not match:
-                continue
-            path_text, line_number, line = match.groups()
-            try:
-                path = Path(path_text).resolve(strict=True)
-                path.relative_to(root)
-            except (OSError, RuntimeError, ValueError):
-                continue
-            safe_line = _redact(line)
-            if not safe_line:
-                continue
-            relative = path.relative_to(root).as_posix()
-            evidence_id = "codebase.{}.{}.{}".format(product, relative, line_number)
-            if evidence_id in seen:
-                continue
-            seen.add(evidence_id)
-            results.append({
-                "id": evidence_id,
-                "source_type": "codebase",
-                "source": "{}:{}".format(relative, line_number),
-                "fact": safe_line,
-                "answer_guidance": "Current implementation excerpt; use only for exact behavior directly supported by this line.",
-            })
-            if len(results) >= max(1, limit):
+
+    def run_patterns(patterns):
+        for pattern in patterns:
+            if len(results) >= min(12, max(1, limit)):
                 break
-    return results
+            args = [
+                rg, "-n", "--no-heading", "--color", "never", "--fixed-strings",
+                "--ignore-case",
+                "--no-follow", "--max-count", "8", "--max-filesize", "1M",
+            ]
+            for glob in _EXCLUDED_GLOBS:
+                args.extend(["--glob", glob])
+            args.extend([pattern, str(root)])
+            try:
+                completed = subprocess.run(
+                    args,
+                    capture_output=True,
+                    text=True,
+                    timeout=1.5,
+                    check=False,
+                )
+            except (OSError, subprocess.TimeoutExpired) as exc:
+                log.warning("Codebase search failed for %s: %s", root.name, exc)
+                return
+            if completed.returncode not in (0, 1):
+                log.warning("Codebase search returned rg status %s", completed.returncode)
+                return
+            for raw_line in completed.stdout.splitlines():
+                match = re.match(r"^(.*?):(\d+):(.*)$", raw_line)
+                if not match:
+                    continue
+                path_text, line_number, line = match.groups()
+                try:
+                    path = Path(path_text).resolve(strict=True)
+                    path.relative_to(root)
+                except (OSError, RuntimeError, ValueError):
+                    continue
+                safe_line = _redact(line)
+                if not safe_line:
+                    continue
+                relative = path.relative_to(root).as_posix()
+                evidence_id = "codebase.{}.{}.{}".format(product, relative, line_number)
+                if evidence_id in seen:
+                    continue
+                seen.add(evidence_id)
+                results.append({
+                    "id": evidence_id,
+                    "source_type": "codebase",
+                    "source": "{}:{}".format(relative, line_number),
+                    "fact": safe_line,
+                    "answer_guidance": "Current implementation excerpt; use only for exact behavior directly supported by this line.",
+                })
+                if len(results) >= min(12, max(1, limit)):
+                    break
+
+    run_patterns(_queries(query))
+    # A single generic word is too noisy. Use it only if no phrase search found
+    # anything, so a precise match such as "jup score" cannot be crowded out.
+    if not results:
+        run_patterns(_single_token_queries(query))
+    return results[:min(12, max(1, limit))]
 
 
 def codebase_prompt(excerpts: list[dict]) -> str:

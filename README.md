@@ -108,7 +108,7 @@ If `CODEBASE_VALHALLA_PATH` and `CODEBASE_OLYMPUS_PATH` are configured and
 two repositories locally. This is a separate opt-in because the selected
 excerpts are sent to OpenAI as model context. The search is read-only and
 bounded: it uses fixed paths, fixed-string queries, excludes
-dependencies/generated files and secret-shaped files, redacts sensitive-looking
+dependencies/generated files, logs/dumps/backups, and secret-shaped files, redacts sensitive-looking
 values, and returns only short excerpts. The model has no shell or filesystem
 write tool. Code excerpts can explain exact implementation behavior, but
 approved facts remain authoritative for fees, security, account-specific
