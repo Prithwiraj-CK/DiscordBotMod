@@ -952,6 +952,20 @@
       "risk": "high",
       "required_fact_ids": ["valhalla.settings.jup_score_zero"],
       "forbidden_claims": ["setting Jup Score to 0 is completely safe", "it overrides every safety restriction"]
+    },
+    {
+      "id": "v044",
+      "question": "What is Jup 0, and does Valhalla need Phantom connected before I copy trade?",
+      "expected_action": "answer",
+      "product": "valhalla",
+      "intent": "wallets",
+      "risk": "high",
+      "required_fact_ids": [
+        "valhalla.settings.jup_score_zero",
+        "valhalla.onboarding.commands",
+        "valhalla.wallets.positions_on_meteora"
+      ],
+      "forbidden_claims": ["Phantom is required to start copy trading", "setting Jup Score to 0 is completely safe"]
     }
   ]
 }

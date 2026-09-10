@@ -193,6 +193,54 @@ def retrieve_facts(query: str, product: str | None = None,
     return [fact for _, _, fact in scored[:max(1, limit)]]
 
 
+def retrieve_notes(query: str, product: str | None = None, limit: int = 4) -> list[dict]:
+    """Retrieve relevant Markdown sections as secondary source context."""
+    query_tokens = _fact_tokens(query)
+    if not query_tokens:
+        return []
+    scored = []
+    for path in sorted(KNOWLEDGE_DIR.glob("*.md")):
+        if path.name.lower() == "readme.md":
+            continue
+        if product in {"valhalla", "olympus"} and path.stem.lower() != product:
+            continue
+        try:
+            text = path.read_text(encoding="utf-8")
+        except OSError:
+            continue
+        chunks = [chunk.strip() for chunk in re.split(r"\n\s*\n", text) if chunk.strip()]
+        for chunk in chunks:
+            chunk_tokens = _fact_tokens(chunk)
+            overlap = len(query_tokens & chunk_tokens)
+            if not overlap:
+                continue
+            score = overlap + (2 if path.stem.lower() in query.lower() else 0)
+            scored.append((score, path.name, chunk[:1800]))
+    scored.sort(key=lambda item: (-item[0], item[1], item[2]))
+    return [
+        {"source": name, "text": text}
+        for _, name, text in scored[:max(1, limit)]
+    ]
+
+
+def notes_prompt(excerpts: list[dict]) -> str:
+    """Render Markdown excerpts as explicitly secondary context."""
+    if not excerpts:
+        return ""
+    blocks = [
+        "# SUPPLEMENTAL PRODUCT NOTES (SECONDARY CONTEXT)",
+        "These excerpts come from local product notes. They help recognize "
+        "terminology and workflows, but approved facts remain authoritative. "
+        "Do not cite these notes as evidence_ids and do not use them to guess.",
+        "",
+    ]
+    for item in excerpts:
+        blocks.append("[NOTE {}]".format(item.get("source", "unknown")))
+        blocks.append(item.get("text", ""))
+        blocks.append("")
+    return "\n".join(blocks).strip()
+
+
 def _history_fingerprint() -> tuple:
     try:
         stat = HISTORY_INDEX_PATH.stat()

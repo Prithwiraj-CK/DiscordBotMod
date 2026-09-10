@@ -90,7 +90,7 @@ supplemental notes. Product-owner clarifications, runtime behavior, and the
 official product documentation take precedence over older notes or examples.
 The evaluator checks schema, duplicate IDs, evidence references, and obvious
 secret-shaped content; it does not call Discord or OpenAI. The current
-regression set contains 95 cases. Routing and posting are autonomous; staff
+regression set contains 96 cases. Routing and posting are autonomous; staff
 approval is not required before the bot makes a shadow proposal. The OpenAI
 replay measures action, evidence, forbidden claims, and semantic support; the
 optional test-channel flag posts each case result only to #bot-test.
@@ -111,8 +111,8 @@ message in an allowed channel
   → last N messages pulled for context
   → tagged images transcribed once as untrusted context
   → structured classifier chooses product, intent, risk and action
-  → retrieve only matching approved facts
-  → retrieve a few matching historical support excerpts from the local index
+  → compound questions get up to four focused evidence searches
+  → retrieve matching approved facts, Markdown notes, and historical excerpts
   → structured drafter cites evidence and validates its action
   → shadow proposal in #bot-test, or autonomous handoff proposal
 ```

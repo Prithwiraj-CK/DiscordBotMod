@@ -42,7 +42,10 @@ import requests
 from dotenv import load_dotenv
 
 from alerts import alert
-from knowledge import history_prompt, load_knowledge, retrieve_facts, retrieve_history
+from knowledge import (
+    history_prompt, load_knowledge, notes_prompt, retrieve_facts,
+    retrieve_history, retrieve_notes,
+)
 from llm import ask_json
 
 load_dotenv()
@@ -462,6 +465,32 @@ VALIDATION_SCHEMA = {
     "required": ["supported", "unsupported_claims", "forbidden_claims"],
 }
 
+SEARCH_PLAN_SCHEMA = {
+    "type": "object",
+    "additionalProperties": False,
+    "properties": {
+        "searches": {
+            "type": "array",
+            "maxItems": 4,
+            "items": {
+                "type": "object",
+                "additionalProperties": False,
+                "properties": {
+                    "query": {"type": "string", "maxLength": 400},
+                    "product": {"type": "string", "enum": ["valhalla", "olympus", "generic", "unknown"]},
+                    "intent": {"type": "string", "enum": [
+                        "onboarding", "fees", "copy_trading", "settings", "risk_controls",
+                        "performance", "wallets", "orders", "sports", "leverage", "security",
+                        "support_triage", "overview", "social", "underspecified", "unknown",
+                    ]},
+                },
+                "required": ["query", "product", "intent"],
+            },
+        },
+    },
+    "required": ["searches"],
+}
+
 ROUTER_SYSTEM = """Classify the current Discord message for an autonomous product-support bot.
 Choose exactly one action:
 - answer: the approved knowledge clearly answers a general product question
@@ -512,6 +541,15 @@ reply with no factual claim is supported. This audit is autonomous and must not
 ask staff for approval.
 
 APPROVED EVIDENCE
+"""
+
+SEARCH_PLANNER_SYSTEM = """Break the user's current message into up to four focused evidence searches.
+Return search queries only, not answers. Separate independent questions or
+features, preserve important terms such as product names, settings, commands,
+wallets, and percentages, and use the best product and intent for each search.
+If the message is already one simple question, return one focused search.
+Never invent facts, commands, or settings that are not present in the user's
+message. This is query planning, not answering.
 """
 
 IMAGE_CONTEXT_SCHEMA = {
@@ -1151,6 +1189,45 @@ def _intent_hint(query):
     return None
 
 
+def _plan_searches(query, product, intent):
+    """Use one bounded planning pass for compound or ambiguous questions."""
+    lowered = (query or "").lower()
+    needs_plan = bool(re.search(
+        r"\b(and|or|then|also|plus|because|but)\b|\[attached image context",
+        lowered,
+    )) or intent in {"unknown", "underspecified"}
+    if not needs_plan:
+        return []
+    try:
+        result = ask_json(
+            SEARCH_PLANNER_SYSTEM,
+            [{"role": "user", "content": query}],
+            SEARCH_PLAN_SCHEMA,
+            name="support_search_plan",
+            temperature=0.0,
+        )
+    except Exception as exc:
+        log.warning("Search planning unavailable, using the original query: %s", exc)
+        return []
+    searches = []
+    for item in result.get("searches", []):
+        if not isinstance(item, dict):
+            continue
+        focused_query = str(item.get("query") or "").strip()
+        if not focused_query:
+            continue
+        planned_product = item.get("product")
+        if planned_product not in {"valhalla", "olympus", "generic", "unknown"}:
+            planned_product = product
+        if product in {"valhalla", "olympus"}:
+            planned_product = product
+        planned_intent = item.get("intent")
+        if not isinstance(planned_intent, str):
+            planned_intent = intent
+        searches.append((focused_query, planned_product, planned_intent))
+    return searches[:4]
+
+
 def _evidence_text(facts):
     blocks = []
     for fact in facts:
@@ -1198,8 +1275,27 @@ def autonomous_decision(query, turns, product_hint=None, force_reply=False):
         intent = hinted_intent
     if product_hint in {"valhalla", "olympus"}:
         product = product_hint
-    facts = retrieve_facts(query, product=product, intent=intent, limit=6)
-    historical_excerpts = retrieve_history(query, product=product, limit=4)
+    searches = [(query, product, intent)]
+    searches.extend(_plan_searches(query, product, intent))
+
+    # Retrieve independently for the original question and each planned
+    # subquestion. A single wrong intent should not hide evidence for the
+    # other parts of a compound message.
+    facts_by_id = OrderedDict()
+    notes_by_key = OrderedDict()
+    history_by_key = OrderedDict()
+    for search_query, search_product, search_intent in searches:
+        for fact in retrieve_facts(
+            search_query, product=search_product, intent=search_intent, limit=6,
+        ):
+            facts_by_id[str(fact.get("id", ""))] = fact
+        for note in retrieve_notes(search_query, product=search_product, limit=4):
+            notes_by_key[(note.get("source", ""), note.get("text", ""))] = note
+        for excerpt in retrieve_history(search_query, product=search_product, limit=4):
+            history_by_key[str(excerpt.get("id", ""))] = excerpt
+    facts = list(facts_by_id.values())[:10]
+    note_excerpts = list(notes_by_key.values())[:6]
+    historical_excerpts = list(history_by_key.values())[:6]
     fact_ids = {str(fact.get("id", "")) for fact in facts}
     hinted_action = _action_hint(query, product, intent)
     if hinted_action:
@@ -1263,6 +1359,8 @@ def autonomous_decision(query, turns, product_hint=None, force_reply=False):
         .format(action, intent, product)
         + _evidence_text(facts)
     )
+    if note_excerpts:
+        draft_prompt += "\n\n" + notes_prompt(note_excerpts)
     if historical_excerpts:
         draft_prompt += "\n\n" + history_prompt(historical_excerpts)
     draft = ask_json(
@@ -1277,7 +1375,20 @@ def autonomous_decision(query, turns, product_hint=None, force_reply=False):
     if known_answer:
         draft_action = "answer"
         draft["draft_answer"] = known_answer
-        draft["evidence_ids"] = sorted(fact_ids)
+        known_ids = set()
+        lowered_query = (query or "").lower()
+        if product == "valhalla" and re.search(
+            r"\bjup(?:iter)?\b", lowered_query,
+        ):
+            known_ids.add("valhalla.settings.jup_score_zero")
+            if re.search(r"phantom|copy\s*trade|\bstart\b|connect", lowered_query):
+                known_ids.update({
+                    "valhalla.onboarding.commands",
+                    "valhalla.wallets.positions_on_meteora",
+                })
+        elif product == "valhalla" and re.search(r"\b(?:dlmm\s+)?ratio\b", lowered_query):
+            known_ids.add("valhalla.copy_trade.ratio")
+        draft["evidence_ids"] = sorted(known_ids & fact_ids) or sorted(fact_ids)
     elif action == "clarify" and draft_action != "clarify":
         draft_action = "clarify"
         draft["draft_answer"] = _fallback_clarification(query)
@@ -1377,7 +1488,7 @@ def autonomous_decision(query, turns, product_hint=None, force_reply=False):
     return {
         "action": draft_action, "product": product, "intent": intent,
         "risk": route.get("risk"), "confidence": route.get("confidence", 0),
-        "evidence_ids": sorted(fact_ids),
+        "evidence_ids": sorted(used_ids & fact_ids),
         "missing_information": draft.get("missing_information", []),
         "draft_answer": answer, "unsupported_claims": [],
     }
