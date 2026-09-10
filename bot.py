@@ -1109,7 +1109,12 @@ def _known_safe_answer(query, product, facts):
 
     if product == "valhalla":
         if re.search(r"\bjup(?:iter)?\b", lowered) and re.search(r"\b0\b|score|filter", lowered):
-            return fact_map.get("valhalla.settings.jup_score_zero", {}).get("fact", "")
+            answer_parts = [fact_map.get("valhalla.settings.jup_score_zero", {}).get("fact", "")]
+            if re.search(r"phantom|copy\s*trade|\bstart\b|connect", lowered):
+                setup = fact_map.get("valhalla.onboarding.commands", {}).get("fact", "")
+                phantom = fact_map.get("valhalla.wallets.positions_on_meteora", {}).get("fact", "")
+                answer_parts.extend(part for part in (setup, phantom) if part)
+            return " ".join(answer_parts)
         if re.search(r"\b(?:dlmm\s+)?ratio\b", lowered):
             ratio_fact = fact_map.get("valhalla.copy_trade.ratio", {}).get("fact", "")
             if ratio_fact:

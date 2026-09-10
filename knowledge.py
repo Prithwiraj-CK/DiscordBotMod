@@ -156,6 +156,8 @@ def retrieve_facts(query: str, product: str | None = None,
         r"\b0\b|score|filter", query_lower,
     ):
         related_ids.update({"valhalla.settings.jup_safety", "valhalla.settings.jup_score_zero"})
+        if re.search(r"phantom|copy\s*trade|\bstart\b|connect", query_lower):
+            related_ids.add("valhalla.onboarding.commands")
         for fact in product_facts:
             if fact.get("id") in related_ids and fact not in candidates:
                 candidates.append(fact)
