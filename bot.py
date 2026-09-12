@@ -165,9 +165,9 @@ CODEBASE_SEARCH_ENABLED = os.getenv("CODEBASE_SEARCH_ENABLED", "false").strip().
 # as well, so a future edit that forgets cannot quietly start posting into a
 # live support channel.
 # ---------------------------------------------------------------------------
-OUTPUT_CHANNEL_ID = "1546057978921095178"          # #bot-test
+OUTPUT_CHANNEL_ID = "1548365535757213758"          # #general in Billi's server
 
-GUILD_ID = os.getenv("GUILD_ID", "925207817923743794").strip()
+GUILD_ID = os.getenv("GUILD_ID", "1548365534762893384").strip()
 
 # Individual channels to read.
 WATCH_CHANNEL_IDS = _parse_channel_ids(
