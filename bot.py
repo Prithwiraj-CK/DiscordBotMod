@@ -1963,7 +1963,14 @@ def _directly_addressed(message):
 def _should_answer(message):
     """Filters applied identically on the live path and in the sweep."""
     channel_id = str(message.get("channel_id", ""))
-    if channel_id not in ALLOWED_CHANNELS:
+    # Keep the existing read allowlist intact. The only extra ingress is a
+    # direct tag/reply in the configured guild, so Salena can be reached there
+    # without starting to read every ordinary message in that server.
+    direct_target_in_configured_guild = (
+        str(message.get("guild_id", "")) == GUILD_ID
+        and _directly_addressed(message)
+    )
+    if channel_id not in ALLOWED_CHANNELS and not direct_target_in_configured_guild:
         return False
 
     author = message.get("author") or {}
