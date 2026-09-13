@@ -46,6 +46,8 @@ permissions to grant, it just needs to be a member.
 configured shadow-output channel; it is never sent as a reply in the source
 channel. Set `SHADOW_MODE=false` only for a deliberate
 live test after migrating to an official Discord bot account.
+Outgoing URLs are wrapped in Discord's no-preview format (`<https://...>`),
+so links remain clickable without creating automatic embeds.
 
 ### 3. Add knowledge
 

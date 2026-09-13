@@ -1926,9 +1926,9 @@ def _answer(message):
             "> {}\n\n"
             "{}"
         ).format(where, name, shown_text[:400].replace("\n", "\n> "), answer)
-        body = body[:2000]
+        body = _discord_safe_format(body).strip()[:2000]
     else:
-        body = answer
+        body = _discord_safe_format(answer).strip()[:2000]
 
     if not shadowed:
         # Wait in silence first, then show typing only for the last few
@@ -1987,6 +1987,7 @@ def _answer_safely(message):
 # replying to every link anyone dropped. Links, and fenced code, are removed
 # before looking for one.
 _URL_RE = re.compile(r"https?://\S+|www\.\S+", re.IGNORECASE)
+_EMBED_URL_RE = re.compile(r"(?<!<)(?:https?://|www\.)[^\s<]+", re.IGNORECASE)
 _CODE_RE = re.compile(r"```.*?```|`[^`]*`", re.DOTALL)
 _MASKED_LINK_RE = re.compile(r"\[([^\]]+)\]\((https?://[^)\s]+)\)")
 _SOCIAL_SMALLTALK_RE = re.compile(
@@ -2012,12 +2013,28 @@ def _social_reply(text):
 
 
 def _discord_safe_format(text):
-    """Use plain URLs because Discord does not reliably render masked links."""
+    """Normalize links and suppress Discord's automatic URL embeds.
+
+    Discord keeps ``<https://...>`` clickable but does not unfurl it. Apply
+    this to the complete outgoing body (including the quoted question), so a
+    link supplied by either the model or the user cannot create an embed.
+    """
     def replace(match):
         label = match.group(1).strip()
         url = match.group(2).strip()
         return url if label == url else "{} ({})".format(label, url)
-    return _MASKED_LINK_RE.sub(replace, text or "")
+
+    normalized = _MASKED_LINK_RE.sub(replace, text or "")
+
+    def suppress(match):
+        url = match.group(0)
+        trailing = ""
+        while url and url[-1] in ".,!?;:)]}":
+            trailing = url[-1] + trailing
+            url = url[:-1]
+        return "<{}>{}".format(url, trailing) if url else trailing
+
+    return _EMBED_URL_RE.sub(suppress, normalized)
 
 
 def _asks_something(text):
