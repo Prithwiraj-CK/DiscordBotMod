@@ -7,15 +7,16 @@ first and marked authoritative in the model context. Each fact has a source,
 verification date, risk level, and intended action (`answer` or `escalate`).
 Product-owner clarifications take precedence over stale docs.
 
-The product `.md` files remain supplemental notes while the index is expanded.
+The product `.md` files are searchable supplemental notes while the index is
+expanded. The active autonomous pipeline retrieves matching sections rather
+than blindly sending every page on every question.
 If a note conflicts with the approved index, the index wins. Do not add raw
 Discord history, secrets, wallet keys, user exports, or database dumps here.
 
 One `.md` per project. `valhalla.md` and `olympus.md` go here.
 
-Every file in this folder is concatenated into the system prompt on every
-question, so keep each one tight — roughly one or two pages. Prefer the things users
-actually ask about over exhaustive internal detail:
+Keep each product file reasonably focused — roughly one or two pages — and
+prefer the things users actually ask about over exhaustive internal detail:
 
 - what the project is, in two lines
 - the main user-facing flows and what can go wrong in each

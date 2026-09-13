@@ -1,7 +1,7 @@
 # Discord AI support bot
 
 Drafts answers to user questions from a set of project one-pagers, posts them
-to `#bot-test` in shadow mode for staff review, and hands off to a human when
+to the configured shadow-output channel for staff review, and hands off to a human when
 it doesn't know.
 
 ## Setup
@@ -36,13 +36,15 @@ support channel → **Copy Channel ID** and put them in `ALLOWED_CHANNEL_IDS`,
 comma-separated. Right-click the staff role → **Copy Role ID** for
 `STAFF_ROLE_ID`.
 
-The bot reads **only** in the listed channels. Empty list = answers nowhere.
+The bot reads **only** in the listed channels, plus directly tagged/replied-to
+messages in the configured server. Empty list = answers nowhere outside that
+direct-tag exception.
 The account must already be able to see and post in each one; there are no
 permissions to grant, it just needs to be a member.
 
-`SHADOW_MODE=true` is the safe default. Every proposal, including one for a
-question typed in `#bot-test`, is posted only in `#bot-test`; it is never sent
-as a reply in the source channel. Set `SHADOW_MODE=false` only for a deliberate
+`SHADOW_MODE=true` is the safe default. Every proposal is posted only in the
+configured shadow-output channel; it is never sent as a reply in the source
+channel. Set `SHADOW_MODE=false` only for a deliberate
 live test after migrating to an official Discord bot account.
 
 ### 3. Add knowledge
@@ -104,15 +106,16 @@ Discord image attachments receive a one-time vision transcription/summary;
 image text is untrusted context and cannot override approved facts.
 
 If `CODEBASE_VALHALLA_PATH` and `CODEBASE_OLYMPUS_PATH` are configured and
-`CODEBASE_SEARCH_ENABLED=true`, product and workflow questions also search those
-two repositories locally. This is a separate opt-in because the selected
-excerpts are sent to OpenAI as model context. The search is read-only and
-bounded: it uses fixed paths, fixed-string queries, excludes
-dependencies/generated files, logs/dumps/backups, and secret-shaped files, redacts sensitive-looking
-values, and returns only short excerpts. The model has no shell or filesystem
-write tool. Code excerpts can explain exact implementation behavior, but
-approved facts remain authoritative for fees, security, account-specific
-support, privacy, and product promises. It is disabled by default.
+`CODEBASE_SEARCH_ENABLED=true`, product and workflow questions also investigate
+those two repositories locally. This is a separate opt-in because the selected
+excerpts are sent to OpenAI as model context. Research is read-only: it uses
+fixed roots, fixed-string searches, multiple evidence-review rounds, and
+bounded line-range reads; it excludes dependencies/generated files,
+logs/dumps/backups, and secret-shaped files, and redacts sensitive-looking
+values. The model has no shell or filesystem-write tool. Code excerpts can
+explain exact implementation behavior, but approved facts remain authoritative
+for fees, security, account-specific support, privacy, and product promises.
+It is disabled by default.
 
 ## How it works
 
@@ -124,8 +127,9 @@ message in an allowed channel
   → structured classifier chooses product, intent, risk and action
   → compound questions get up to four focused evidence searches
   → retrieve matching approved facts, Markdown notes, historical excerpts, and safe code excerpts
+  → review evidence and iteratively search/read more relevant repository material
   → structured drafter cites evidence and validates its action
-  → shadow proposal in #bot-test, or autonomous handoff proposal
+  → shadow proposal in the configured output channel, or autonomous handoff proposal
 ```
 
 A 5 minute sweep runs alongside as a safety net for anything the gateway

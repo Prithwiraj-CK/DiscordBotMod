@@ -121,8 +121,14 @@ def _redact(line: str) -> str | None:
     return _SECRET_VALUE_RE.sub(r"\1[REDACTED]", line.strip())[:900]
 
 
-def search_codebase(query: str, product: str | None, limit: int = 8) -> list[dict]:
-    """Return short, redacted read-only code excerpts relevant to ``query``."""
+def search_codebase(query: str, product: str | None, limit: int = 32) -> list[dict]:
+    """Return many short, redacted excerpts for an agent research pass.
+
+    This is intentionally exhaustive across matching files rather than a
+    single best-hit lookup. The caller still decides which excerpts belong in
+    the final answer, so the model can investigate broadly without receiving a
+    whole repository in one prompt.
+    """
     root = _root_for(product)
     rg = _rg_path()
     if root is None or rg is None:
@@ -133,12 +139,12 @@ def search_codebase(query: str, product: str | None, limit: int = 8) -> list[dic
 
     def run_patterns(patterns):
         for pattern in patterns:
-            if len(results) >= min(12, max(1, limit)):
+            if len(results) >= min(64, max(1, limit)):
                 break
             args = [
                 rg, "-n", "--no-heading", "--color", "never", "--fixed-strings",
                 "--ignore-case",
-                "--no-follow", "--max-count", "8", "--max-filesize", "1M",
+                "--no-follow", "--max-count", "32", "--max-filesize", "4M",
             ]
             for glob in _EXCLUDED_GLOBS:
                 args.extend(["--glob", glob])
@@ -148,7 +154,7 @@ def search_codebase(query: str, product: str | None, limit: int = 8) -> list[dic
                     args,
                     capture_output=True,
                     text=True,
-                    timeout=1.5,
+                    timeout=10.0,
                     check=False,
                 )
             except (OSError, subprocess.TimeoutExpired) as exc:
@@ -177,6 +183,7 @@ def search_codebase(query: str, product: str | None, limit: int = 8) -> list[dic
                 seen.add(evidence_id)
                 results.append({
                     "id": evidence_id,
+                    "product": product,
                     "source_type": "codebase",
                     "source": "{}:{}".format(relative, line_number),
                     "path": relative,
@@ -184,7 +191,7 @@ def search_codebase(query: str, product: str | None, limit: int = 8) -> list[dic
                     "fact": safe_line,
                     "answer_guidance": "Current implementation excerpt; use only for exact behavior directly supported by this line.",
                 })
-                if len(results) >= min(12, max(1, limit)):
+                if len(results) >= min(64, max(1, limit)):
                     break
 
     run_patterns(_queries(query))
@@ -192,38 +199,62 @@ def search_codebase(query: str, product: str | None, limit: int = 8) -> list[dic
     # anything, so a precise match such as "jup score" cannot be crowded out.
     if not results:
         run_patterns(_single_token_queries(query))
-    return results[:min(12, max(1, limit))]
+    return results[:min(64, max(1, limit))]
 
 
-def read_codebase_context(product: str | None, relative_path: str, line_number: int, radius: int = 3) -> dict | None:
-    """Read a few nearby redacted lines from an already matched safe file."""
+def _safe_codebase_path(product: str | None, relative_path: str) -> tuple[Path, Path] | None:
     root = _root_for(product)
     if root is None:
         return None
     try:
         path = (root / str(relative_path)).resolve(strict=True)
         path.relative_to(root)
-        line_number = int(line_number)
     except (OSError, RuntimeError, ValueError, TypeError):
         return None
-    if line_number < 1 or path.suffix.lower() in {".pem", ".key"}:
+    if path.suffix.lower() in {".pem", ".key"}:
         return None
-    if any(part.lower() in {".git", "node_modules", ".next", "dist", "build", "coverage", "logs", "output", "tmp", "backup", "backups"} for part in path.parts):
+    excluded_parts = {".git", "node_modules", ".next", "dist", "build", "coverage", "logs", "output", "tmp", "backup", "backups"}
+    if any(part.lower() in excluded_parts for part in path.parts):
         return None
     if any(marker in path.name.lower() for marker in ("secret", "credential", "private", "log", "dump")):
         return None
+    return root, path
+
+
+def read_codebase_file(
+    product: str | None,
+    relative_path: str,
+    start_line: int = 1,
+    end_line: int | None = None,
+) -> dict | None:
+    """Read a bounded line range from a safe file under a configured root.
+
+    The model may request a path only as a read operation. The path is always
+    resolved under the fixed product root, sensitive/generated locations are
+    rejected, and every returned line is redacted before leaving the process.
+    """
+    resolved = _safe_codebase_path(product, relative_path)
+    if resolved is None:
+        return None
+    root, path = resolved
     try:
-        text = path.read_text(encoding="utf-8")
+        if path.stat().st_size > 512 * 1024:
+            return None
+        lines = path.read_text(encoding="utf-8").splitlines()
     except (OSError, UnicodeDecodeError):
         return None
-    lines = text.splitlines()
-    if line_number > len(lines):
+    try:
+        start_line = max(1, int(start_line))
+        end_line = len(lines) if end_line is None else min(len(lines), int(end_line))
+    except (TypeError, ValueError):
         return None
-    radius = min(5, max(1, int(radius)))
-    start = max(1, line_number - radius)
-    end = min(len(lines), line_number + radius)
+    # A single read is enough for local reasoning, but never lets a model
+    # request an unbounded file dump into the OpenAI prompt.
+    end_line = min(end_line, start_line + 249)
+    if start_line > len(lines) or end_line < start_line:
+        return None
     rendered = []
-    for number in range(start, end + 1):
+    for number in range(start_line, end_line + 1):
         safe_line = _redact(lines[number - 1])
         if safe_line:
             rendered.append("{}: {}".format(number, safe_line))
@@ -231,14 +262,39 @@ def read_codebase_context(product: str | None, relative_path: str, line_number: 
         return None
     relative = path.relative_to(root).as_posix()
     return {
-        "id": "codebase.{}.{}.{}-{}".format(product, relative, start, end),
-        "source_type": "codebase_context",
-        "source": "{}:{}-{}".format(relative, start, end),
+        "id": "codebase.{}.{}.{}-{}".format(product, relative, start_line, end_line),
+        "product": product,
+        "source_type": "codebase_file",
+        "source": "{}:{}-{}".format(relative, start_line, end_line),
         "path": relative,
-        "line": line_number,
-        "fact": "\n".join(rendered)[:4000],
-        "answer_guidance": "Nearby current implementation context; do not infer behavior beyond these lines.",
+        "line": start_line,
+        "fact": "\n".join(rendered)[:12000],
+        "answer_guidance": "Read-only implementation context; use only behavior directly supported by these lines.",
     }
+
+
+def read_codebase_context(product: str | None, relative_path: str, line_number: int, radius: int = 3) -> dict | None:
+    """Read a few nearby redacted lines from an already matched safe file."""
+    resolved = _safe_codebase_path(product, relative_path)
+    if resolved is None:
+        return None
+    _, path = resolved
+    root = _root_for(product)
+    if root is None:
+        return None
+    try:
+        line_number = int(line_number)
+    except (ValueError, TypeError):
+        return None
+    if line_number < 1:
+        return None
+    radius = min(5, max(1, int(radius)))
+    context = read_codebase_file(
+        product, relative_path, line_number - radius, line_number + radius,
+    )
+    if context:
+        context["source_type"] = "codebase_context"
+    return context
 
 
 def codebase_prompt(excerpts: list[dict]) -> str:

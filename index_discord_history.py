@@ -29,7 +29,10 @@ load_dotenv(ROOT / ".env")
 API = "https://discord.com/api/v9"
 TOKEN = os.getenv("DISCORD_USER_TOKEN", "").strip()
 GUILD_ID = os.getenv("GUILD_ID", "925207817923743794").strip()
-OUTPUT_CHANNEL_ID = "1546057978921095178"
+OUTPUT_CHANNEL_IDS = {
+    "1546057978921095178",  # legacy #bot-test transcripts
+    "1548365535757213758",  # current #general shadow output
+}
 INDEX_PATH = ROOT / ".runtime" / "discord_history_index.json"
 TEAM_IDS = {
     value.strip()
@@ -98,10 +101,10 @@ def channels_to_index() -> list[dict]:
                 "name": channel.get("name") or channel_id,
                 "parent_id": str(channel.get("parent_id") or ""),
             })
-    # #bot-test is an output/transcript channel. It may be allowed for live
+    # Output channels are transcript channels. They may be allowed for live
     # shadow proposals, but its generated messages must never become training
     # or retrieval material for future answers.
-    picked = [channel for channel in picked if channel["id"] != OUTPUT_CHANNEL_ID]
+    picked = [channel for channel in picked if channel["id"] not in OUTPUT_CHANNEL_IDS]
     return sorted(picked, key=lambda channel: (channel["name"].lower(), channel["id"]))
 
 

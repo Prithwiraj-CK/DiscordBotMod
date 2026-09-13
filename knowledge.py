@@ -1,8 +1,8 @@
 """Loads the one-pagers the bot answers from.
 
 Drop a .md file per project into knowledge/ (valhalla.md, olympus.md, ...).
-Every file is concatenated into the system prompt, so keep them tight - this
-text is sent on every single question.
+The active autonomous pipeline retrieves matching paragraphs from these files;
+the legacy system-prompt helper can still render the full set when used.
 
 Edits are picked up without a restart. The files are the fastest lever on
 answer quality, so writing one should not mean taking the bot offline.
@@ -20,7 +20,10 @@ log = logging.getLogger("support-bot.knowledge")
 KNOWLEDGE_DIR = Path(__file__).parent / "knowledge"
 APPROVED_FACTS_PATH = KNOWLEDGE_DIR / "approved_facts.json"
 HISTORY_INDEX_PATH = Path(__file__).parent / ".runtime" / "discord_history_index.json"
-HISTORY_OUTPUT_CHANNEL_ID = "1546057978921095178"
+HISTORY_OUTPUT_CHANNEL_IDS = {
+    "1546057978921095178",  # legacy #bot-test transcripts
+    "1548365535757213758",  # current #general shadow output
+}
 
 _cached_text = ""
 _cached_fingerprint: tuple | None = None
@@ -285,7 +288,7 @@ def retrieve_history(query: str, product: str | None = None, limit: int = 4) -> 
     for item in load_history_index():
         # The test channel contains generated eval transcripts, not source
         # support. Never let the bot learn its own drafts as staff examples.
-        if str(item.get("channel_id", "")) == HISTORY_OUTPUT_CHANNEL_ID:
+        if str(item.get("channel_id", "")) in HISTORY_OUTPUT_CHANNEL_IDS:
             continue
         searchable = " ".join(
             str(item.get(field, ""))

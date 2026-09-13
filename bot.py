@@ -42,7 +42,9 @@ import requests
 from dotenv import load_dotenv
 
 from alerts import alert
-from codebase_search import codebase_prompt, read_codebase_context, search_codebase
+from codebase_search import (
+    codebase_prompt, read_codebase_context, read_codebase_file, search_codebase,
+)
 from knowledge import (
     history_prompt, load_knowledge, notes_prompt, retrieve_facts,
     retrieve_history, retrieve_notes,
@@ -182,7 +184,7 @@ WATCH_CATEGORY_IDS = _parse_channel_ids(
 )
 
 # Filled in by _resolve_watched(). Always includes OUTPUT_CHANNEL_ID so the
-# test channel itself stays usable for direct questions.
+# output channel itself stays usable for direct questions.
 ALLOWED_CHANNELS = set()
 
 # The model emits this exact token when it can't answer. We never show it to
@@ -523,6 +525,21 @@ EVIDENCE_REVIEW_SCHEMA = {
             },
         },
         "read_evidence_ids": {"type": "array", "maxItems": 4, "items": {"type": "string"}},
+        "read_files": {
+            "type": "array",
+            "maxItems": 4,
+            "items": {
+                "type": "object",
+                "additionalProperties": False,
+                "properties": {
+                    "product": {"type": "string", "enum": ["valhalla", "olympus"]},
+                    "path": {"type": "string", "maxLength": 300},
+                    "start_line": {"type": "integer", "minimum": 1},
+                    "end_line": {"type": "integer", "minimum": 1},
+                },
+                "required": ["product", "path", "start_line", "end_line"],
+            },
+        },
     },
     "required": ["needs_more_search", "follow_up_searches", "read_evidence_ids"],
 }
@@ -596,11 +613,12 @@ EVIDENCE_REVIEW_SYSTEM = """Review the current evidence for the user's question 
 Do not answer the user. Decide whether one bounded follow-up research pass is
 needed. If evidence is incomplete or only matches a neighboring topic, return
 focused searches. You may request nearby lines only for evidence IDs already
-listed in the current evidence. Never request a path, shell command, secret,
-or arbitrary file. Product-owner clarifications and approved facts remain the
-authority for fees, security, account-specific issues, and product promises.
-Return no more than three follow-up searches and four existing evidence IDs to
-read in context.
+listed in the current evidence, or a bounded line range from a safe file path
+already shown in the current codebase excerpts. Never request a shell command,
+secret, write, or path that has not appeared in the current codebase evidence.
+Product-owner clarifications and approved facts remain the authority for fees,
+security, account-specific issues, and product promises. Return no more than
+three follow-up searches, four existing evidence IDs, and four safe file reads.
 """
 
 IMAGE_CONTEXT_SCHEMA = {
@@ -1303,13 +1321,15 @@ def _plan_searches(query, product, intent):
     return searches[:4]
 
 
-def _review_evidence(query, product, intent, facts):
-    """Ask for one bounded follow-up pass when the first retrieval is weak."""
+def _review_evidence(query, product, intent, facts, codebase_items=None, notes=None):
+    """Ask for the next safe search/read operations in a research loop."""
     prompt = (
         EVIDENCE_REVIEW_SYSTEM
         + "\nCURRENT QUESTION: {}\nPRODUCT: {}\nINTENT: {}\n\n"
         "CURRENT APPROVED EVIDENCE:\n{}"
     ).format(query, product, intent, _evidence_text(facts))
+    if notes:
+        prompt += "\n\nCURRENT SECONDARY MARKDOWN NOTES:\n" + notes_prompt(notes)
     try:
         result = ask_json(
             prompt,
@@ -1320,7 +1340,10 @@ def _review_evidence(query, product, intent, facts):
         )
     except Exception as exc:
         log.warning("Evidence review unavailable; keeping initial retrieval: %s", exc)
-        return {"needs_more_search": False, "follow_up_searches": [], "read_evidence_ids": []}
+        return {
+            "needs_more_search": False, "follow_up_searches": [],
+            "read_evidence_ids": [], "read_files": [],
+        }
 
     searches = []
     for item in result.get("follow_up_searches", []):
@@ -1338,10 +1361,37 @@ def _review_evidence(query, product, intent, facts):
         if not isinstance(planned_intent, str):
             planned_intent = intent
         searches.append((focused_query[:400], planned_product, planned_intent))
+    available_paths = {
+        (str(item.get("product", "")), str(item.get("path", "")))
+        for item in (codebase_items or [])
+        if item.get("path")
+    }
+    read_files = []
+    for item in result.get("read_files", []):
+        if not isinstance(item, dict):
+            continue
+        requested_product = item.get("product")
+        requested_path = str(item.get("path") or "").strip()
+        if product in {"valhalla", "olympus"}:
+            requested_product = product
+        if (requested_product, requested_path) not in available_paths:
+            continue
+        try:
+            start_line = max(1, int(item.get("start_line", 1)))
+            end_line = max(start_line, int(item.get("end_line", start_line)))
+        except (TypeError, ValueError):
+            continue
+        read_files.append({
+            "product": requested_product,
+            "path": requested_path,
+            "start_line": start_line,
+            "end_line": min(end_line, start_line + 249),
+        })
     return {
         "needs_more_search": result.get("needs_more_search") is True,
         "follow_up_searches": searches[:3],
         "read_evidence_ids": [str(value) for value in result.get("read_evidence_ids", [])][:4],
+        "read_files": read_files[:4],
     }
 
 
@@ -1356,7 +1406,7 @@ def _evidence_text(facts):
             lines.append("Guidance: {}".format(fact["answer_guidance"]))
         if fact.get("links"):
             lines.append("Links: {}".format(", ".join(fact["links"])))
-        if fact.get("source_type") == "codebase":
+        if str(fact.get("source_type", "")).startswith("codebase"):
             lines.append("Codebase source: {}".format(fact.get("source", "unknown")))
         blocks.append("\n".join(lines))
     return "\n\n".join(blocks) or "(no approved evidence matched)"
@@ -1416,7 +1466,7 @@ def autonomous_decision(query, turns, product_hint=None, force_reply=False):
     def collect_search(search_query, search_product, search_intent):
         """Collect one bounded search without letting the model choose paths."""
         for fact in retrieve_facts(
-            search_query, product=search_product, intent=search_intent, limit=6,
+            search_query, product=search_product, intent=search_intent, limit=10,
         ):
             facts_by_id[str(fact.get("id", ""))] = fact
         codebase_product = search_product
@@ -1429,11 +1479,11 @@ def autonomous_decision(query, turns, product_hint=None, force_reply=False):
         if CODEBASE_SEARCH_ENABLED and codebase_product in {"valhalla", "olympus"} and _should_search_codebase(
             search_query, search_intent,
         ):
-            for excerpt in search_codebase(search_query, codebase_product, limit=8):
+            for excerpt in search_codebase(search_query, codebase_product, limit=32):
                 codebase_by_id[str(excerpt.get("id", ""))] = excerpt
-        for note in retrieve_notes(search_query, product=search_product, limit=4):
+        for note in retrieve_notes(search_query, product=search_product, limit=12):
             notes_by_key[(note.get("source", ""), note.get("text", ""))] = note
-        for excerpt in retrieve_history(search_query, product=search_product, limit=4):
+        for excerpt in retrieve_history(search_query, product=search_product, limit=12):
             history_by_key[str(excerpt.get("id", ""))] = excerpt
 
     # Retrieve independently for the original question and each planned
@@ -1442,11 +1492,11 @@ def autonomous_decision(query, turns, product_hint=None, force_reply=False):
     for search_query, search_product, search_intent in searches:
         collect_search(search_query, search_product, search_intent)
 
-    # Give the evidence a single bounded review pass. This lets her notice
-    # that the first hit answered a neighboring topic, then search a focused
-    # phrase or read nearby lines from an already matched safe file. The
-    # review is deliberately skipped for greetings, account/security issues,
-    # and discrepancy reports, where guessing is more harmful than handoff.
+    # Give the evidence a thorough review loop. This lets her notice that the
+    # first hit answered a neighboring topic, then search focused phrases and
+    # read relevant portions of the already matched repository. The review is
+    # deliberately skipped for greetings, account/security issues, and
+    # discrepancy reports, where guessing is more harmful than handoff.
     review_allowed = (
         CODEBASE_SEARCH_ENABLED
         and product in {"valhalla", "olympus"}
@@ -1456,33 +1506,84 @@ def autonomous_decision(query, turns, product_hint=None, force_reply=False):
         and not _DISCREPANCY_RE.search(query)
     )
     if review_allowed:
-        preliminary = list(facts_by_id.values())[:10] + list(codebase_by_id.values())[:8]
-        review = _review_evidence(query, product, intent, preliminary)
-        if review["needs_more_search"]:
-            for search_query, search_product, search_intent in review["follow_up_searches"]:
-                collect_search(search_query, search_product, search_intent)
-        for evidence_id in review["read_evidence_ids"]:
-            excerpt = codebase_by_id.get(evidence_id)
-            if not excerpt or excerpt.get("source_type") != "codebase":
-                continue
-            context = read_codebase_context(
-                product,
-                excerpt.get("path", ""),
-                excerpt.get("line", 0),
-                radius=3,
+        # No latency ceiling: continue until the evidence reviewer says it has
+        # enough or a round produces no new safe material. The hard limits are
+        # research-shape limits, not timing limits, and prevent an accidental
+        # loop from sending the same search forever.
+        seen_searches = {(str(q), str(p), str(i)) for q, p, i in searches}
+        seen_reads = set()
+        for research_round in range(1, 9):
+            current_codebase = list(codebase_by_id.values())
+            preliminary = (
+                list(facts_by_id.values())[:20]
+                + current_codebase[:48]
             )
-            if context:
-                codebase_by_id[str(context["id"])] = context
+            review = _review_evidence(
+                query, product, intent, preliminary, current_codebase,
+                list(notes_by_key.values())[:12],
+            )
+            changed = False
+            if review["needs_more_search"]:
+                for search_query, search_product, search_intent in review["follow_up_searches"]:
+                    key = (str(search_query), str(search_product), str(search_intent))
+                    if key in seen_searches:
+                        continue
+                    seen_searches.add(key)
+                    before = (len(facts_by_id), len(codebase_by_id), len(notes_by_key), len(history_by_key))
+                    collect_search(search_query, search_product, search_intent)
+                    changed = changed or before != (
+                        len(facts_by_id), len(codebase_by_id), len(notes_by_key), len(history_by_key),
+                    )
+            for evidence_id in review["read_evidence_ids"]:
+                if evidence_id in seen_reads:
+                    continue
+                excerpt = codebase_by_id.get(evidence_id)
+                if not excerpt or excerpt.get("source_type") not in {"codebase", "codebase_file"}:
+                    continue
+                seen_reads.add(evidence_id)
+                context = read_codebase_context(
+                    product,
+                    excerpt.get("path", ""),
+                    excerpt.get("line", 0),
+                    radius=5,
+                )
+                if context and str(context["id"]) not in codebase_by_id:
+                    codebase_by_id[str(context["id"])] = context
+                    changed = True
+            for request in review["read_files"]:
+                read_key = (
+                    request["product"], request["path"],
+                    request["start_line"], request["end_line"],
+                )
+                if read_key in seen_reads:
+                    continue
+                seen_reads.add(read_key)
+                excerpt = read_codebase_file(
+                    request["product"], request["path"],
+                    request["start_line"], request["end_line"],
+                )
+                if excerpt and str(excerpt["id"]) not in codebase_by_id:
+                    codebase_by_id[str(excerpt["id"])] = excerpt
+                    changed = True
+            log.info(
+                "Codebase research round=%s searches=%s reads=%s evidence=%s",
+                research_round, len(seen_searches), len(seen_reads),
+                len(facts_by_id) + len(codebase_by_id),
+            )
+            if not review["needs_more_search"] and not review["read_evidence_ids"] and not review["read_files"]:
+                break
+            if not changed:
+                break
 
-    facts = list(facts_by_id.values())[:10]
+    facts = list(facts_by_id.values())[:20]
     codebase_items = list(codebase_by_id.values())
     # Nearby context is more useful than another isolated matching line.
     context_items = [item for item in codebase_items if item.get("source_type") == "codebase_context"]
     line_items = [item for item in codebase_items if item.get("source_type") != "codebase_context"]
-    codebase_excerpts = (context_items + line_items)[:8]
+    codebase_excerpts = (context_items + line_items)[:24]
     facts.extend(codebase_excerpts)
-    note_excerpts = list(notes_by_key.values())[:6]
-    historical_excerpts = list(history_by_key.values())[:6]
+    note_excerpts = list(notes_by_key.values())[:12]
+    historical_excerpts = list(history_by_key.values())[:12]
     fact_ids = {str(fact.get("id", "")) for fact in facts}
     hinted_action = _action_hint(query, product, intent)
     if hinted_action:
@@ -1804,10 +1905,10 @@ def _answer(message):
 
     shadowed = SHADOW_MODE
     if shadowed:
-        # A PROPOSAL is always shown in the test channel next to the question,
+        # A PROPOSAL is always shown in the configured output channel next to the question,
         # never sent to the person who asked. This also applies to questions
-        # typed directly in #bot-test, so that channel cannot accidentally
-        # become a live-reply channel.
+        # typed directly in the output channel, so shadow mode cannot
+        # accidentally become a live-reply channel.
         where = _channel_names.get(channel_id, channel_id)
         shown_text = text or "[image attachment]"
         body = (
@@ -1856,7 +1957,7 @@ def _answer(message):
                   key="automod-block")
         elif "HTTP 403" in detail:
             log.warning("No permission to post in %s", OUTPUT_CHANNEL_ID)
-            alert("Cannot post in the test channel, check permissions.",
+            alert("Cannot post in the configured output channel, check permissions.",
                   key="forbidden-output")
         else:
             log.warning("Post failed for message %s: %s", message_id, detail)
