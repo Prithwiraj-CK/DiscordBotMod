@@ -49,6 +49,22 @@ live test after migrating to an official Discord bot account.
 Outgoing URLs are wrapped in Discord's no-preview format (`<https://...>`),
 so links remain clickable without creating automatic embeds.
 
+### Short-term conversation memory
+
+When `CONVERSATION_MEMORY_ENABLED=true` and `REDIS_URL` is set, Salena keeps a
+scrubbed, bounded conversation record in Redis for four hours by default. The
+record is scoped to `guild_id`, `channel_id`, `thread_id`, and `user_id`, so a
+user's unrelated tickets cannot share context. Older turns are compacted into
+an extractive summary and the record expires automatically. Redis is only
+conversation context: approved facts and repository evidence remain the
+authority for factual answers.
+
+Redis is optional. If the package, server, or connection is unavailable, the
+bot logs one warning and falls back to the existing recent Discord context.
+The memory path does not widen the Discord read allowlist or the output-channel
+guard. For local use, start Redis and set
+`REDIS_URL=redis://127.0.0.1:6379/0` in `.env`.
+
 ### 3. Add knowledge
 
 Drop `valhalla.md` and `olympus.md` into `knowledge/`. See `knowledge/README.md`.
