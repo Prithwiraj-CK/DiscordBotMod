@@ -213,12 +213,12 @@ _IDENTITY_QUESTION_RE = re.compile(
 # None of these say yes or no. They skip the question, which is the only
 # honest thing available that is also not an admission.
 _IDENTITY_DEFLECTIONS = (
-    "haha. anyway, did you need something?",
-    "lol. what's up, anything i can help with?",
-    "ha, ok. was there something you needed?",
-    "anyway 😄 what did you need?",
-    "haha. you after something valhalla or olympus related?",
-    "lol ok. anything you actually needed?",
+    "Anyway, did you need something?",
+    "What's up? Is there anything I can help with?",
+    "Was there something you needed?",
+    "What did you need?",
+    "Were you asking about Valhalla or Olympus?",
+    "Did you need help with something?",
 )
 
 # Money and account questions must reach a person. The model is told to emit
@@ -541,7 +541,7 @@ EVIDENCE_REVIEW_SCHEMA = {
             },
         },
     },
-    "required": ["needs_more_search", "follow_up_searches", "read_evidence_ids"],
+    "required": ["needs_more_search", "follow_up_searches", "read_evidence_ids", "read_files"],
 }
 
 ROUTER_SYSTEM = """Classify the current Discord message for an autonomous product-support bot.
@@ -1215,6 +1215,8 @@ def _known_safe_answer(query, product, facts):
     fact_map = {str(fact.get("id")): fact for fact in facts}
 
     if product == "valhalla":
+        if re.search(r"\b(start|get started|begin|onboard)\b", lowered):
+            return "Run `/valhalla start` in Discord, or start from the Valhalla website: https://valhalla-bot.app/."
         if re.search(r"\b(video|tutorial|walkthrough)\b", lowered) and re.search(
             r"\b(set ?up|setup|start|configure)\b", lowered,
         ):
@@ -1684,6 +1686,13 @@ def autonomous_decision(query, turns, product_hint=None, force_reply=False):
             r"\b(best|how)\b.*\b(set ?up|setup|configure)\b", lowered_query,
         ):
             known_ids.add("valhalla.onboarding.best_setup_walkthrough")
+        elif product == "valhalla" and re.search(
+            r"\b(start|get started|begin|onboard)\b", lowered_query,
+        ):
+            known_ids.update({
+                "valhalla.onboarding.commands",
+                "valhalla.onboarding.website",
+            })
         elif product == "valhalla" and re.search(r"\b(?:dlmm\s+)?ratio\b", lowered_query):
             known_ids.add("valhalla.copy_trade.ratio")
         draft["evidence_ids"] = sorted(known_ids & fact_ids) or sorted(fact_ids)
@@ -1901,6 +1910,7 @@ def _answer(message):
     if ESCALATE in answer:
         answer = _escalation_reply()
 
+    answer = _discord_safe_format(answer).strip()
     answer = answer[:2000]
 
     shadowed = SHADOW_MODE
@@ -1978,6 +1988,7 @@ def _answer_safely(message):
 # before looking for one.
 _URL_RE = re.compile(r"https?://\S+|www\.\S+", re.IGNORECASE)
 _CODE_RE = re.compile(r"```.*?```|`[^`]*`", re.DOTALL)
+_MASKED_LINK_RE = re.compile(r"\[([^\]]+)\]\((https?://[^)\s]+)\)")
 _SOCIAL_SMALLTALK_RE = re.compile(
     r"^(?:@?salena\s+)?(?:hi|hello|hey|yo|gm|good morning|"
     r"how are you(?: doing)?|how r u|how's it going|what's up|sup|"
@@ -1994,10 +2005,19 @@ def _is_social_smalltalk(text):
 def _social_reply(text):
     lowered = (text or "").lower()
     if "how are" in lowered or "how r u" in lowered or "how's it going" in lowered:
-        return "good haha, how are you?"
+        return "Doing well—how are you?"
     if "thank" in lowered:
-        return "of course haha"
-    return "hey haha, what's up?"
+        return "Of course."
+    return "Hey, what's up?"
+
+
+def _discord_safe_format(text):
+    """Use plain URLs because Discord does not reliably render masked links."""
+    def replace(match):
+        label = match.group(1).strip()
+        url = match.group(2).strip()
+        return url if label == url else "{} ({})".format(label, url)
+    return _MASKED_LINK_RE.sub(replace, text or "")
 
 
 def _asks_something(text):
