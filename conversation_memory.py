@@ -208,14 +208,18 @@ class ConversationMemory:
             self._client = None
             return False
 
-    def load(self, scope):
+    def load(self, scope, exclude_message_id=""):
         """Return safe model turns, with summary first and newest turns retained."""
         if not self._client:
             return []
         key = self.key(**scope)
         payload = self._read(key)
         summary = payload.get("summary", "")
-        turns = payload.get("turns", [])
+        excluded = str(exclude_message_id or "")
+        turns = [
+            turn for turn in payload.get("turns", [])
+            if not excluded or turn.get("message_id") != excluded
+        ]
         result = []
         if summary:
             result.append({
