@@ -489,6 +489,32 @@ VALIDATION_SCHEMA = {
     "required": ["supported", "unsupported_claims", "forbidden_claims"],
 }
 
+REASONING_SCHEMA = {
+    "type": "object",
+    "additionalProperties": False,
+    "properties": {
+        "decision": {"type": "string", "enum": ["answer", "clarify", "escalate"]},
+        "answerable": {"type": "boolean"},
+        "evidence_ids": {"type": "array", "items": {"type": "string"}},
+        "claim_evidence": {
+            "type": "array",
+            "maxItems": 12,
+            "items": {
+                "type": "object",
+                "additionalProperties": False,
+                "properties": {
+                    "claim": {"type": "string", "maxLength": 400},
+                    "evidence_ids": {"type": "array", "items": {"type": "string"}},
+                },
+                "required": ["claim", "evidence_ids"],
+            },
+        },
+        "gaps": {"type": "array", "items": {"type": "string"}},
+        "conflicts": {"type": "array", "items": {"type": "string"}},
+    },
+    "required": ["decision", "answerable", "evidence_ids", "claim_evidence", "gaps", "conflicts"],
+}
+
 SEARCH_PLAN_SCHEMA = {
     "type": "object",
     "additionalProperties": False,
@@ -620,6 +646,20 @@ reply with no factual claim is supported. This audit is autonomous and must not
 ask staff for approval.
 
 APPROVED EVIDENCE AND READ-ONLY CODEBASE EXCERPTS
+"""
+
+REASONING_SYSTEM = """Act as a deliberate research analyst for an autonomous product-support response.
+Do not write the user-facing answer and do not reveal private chain-of-thought.
+Return only a concise structured synthesis of the evidence supplied below.
+Decide whether the current question is answerable, needs one clarification, or
+must be escalated. Map each factual claim you believe can be made to the
+evidence IDs that support it. Treat complete repository sections as stronger
+than isolated lines, compare frontend/backend/routes/documentation when
+available, and preserve conflicts instead of guessing. Historical excerpts are
+style context only. Approved facts remain authoritative for fees, security,
+privacy, account-specific issues, and public product promises.
+
+EVIDENCE
 """
 
 SEARCH_PLANNER_SYSTEM = """Break the user's current message into up to four focused evidence searches.
@@ -1429,6 +1469,47 @@ def _review_evidence(query, product, intent, facts, codebase_items=None, notes=N
     }
 
 
+def _synthesize_research(query, product, intent, facts, notes=None):
+    """Run a concise second-pass deliberation over the completed evidence set."""
+    prompt = (
+        REASONING_SYSTEM
+        + "\nCURRENT QUESTION: {}\nPRODUCT: {}\nINTENT: {}\n\n"
+        .format(query, product, intent)
+        + _evidence_text(facts)
+    )
+    if notes:
+        prompt += "\n\n" + notes_prompt(notes)
+    try:
+        result = ask_json(
+            prompt,
+            [{"role": "user", "content": query}],
+            REASONING_SCHEMA,
+            name="support_reasoning_synthesis",
+            temperature=0.0,
+        )
+    except Exception as exc:
+        log.warning("Deliberative synthesis unavailable; keeping researched evidence: %s", exc)
+        return None
+
+    allowed_ids = {str(item.get("id", "")) for item in facts}
+    claim_evidence = []
+    for item in result.get("claim_evidence", []):
+        if not isinstance(item, dict):
+            continue
+        claim = str(item.get("claim") or "").strip()
+        ids = sorted({str(value) for value in item.get("evidence_ids", [])} & allowed_ids)
+        if claim and ids:
+            claim_evidence.append({"claim": claim, "evidence_ids": ids})
+    return {
+        "decision": result.get("decision"),
+        "answerable": result.get("answerable") is True,
+        "evidence_ids": sorted({str(value) for value in result.get("evidence_ids", [])} & allowed_ids),
+        "claim_evidence": claim_evidence[:12],
+        "gaps": [str(value) for value in result.get("gaps", [])][:8],
+        "conflicts": [str(value) for value in result.get("conflicts", [])][:8],
+    }
+
+
 def _evidence_text(facts):
     blocks = []
     for fact in facts:
@@ -1671,9 +1752,25 @@ def autonomous_decision(query, turns, product_hint=None, force_reply=False):
     note_excerpts = list(notes_by_key.values())[:12]
     historical_excerpts = list(history_by_key.values())[:12]
     fact_ids = {str(fact.get("id", "")) for fact in facts}
+    research_synthesis = None
+    if (
+        product in {"valhalla", "olympus"}
+        and intent not in {"social", "addressed_to_staff"}
+        and not _SECURITY_RE.search(query)
+        and not _DISCREPANCY_RE.search(query)
+    ):
+        research_synthesis = _synthesize_research(
+            query, product, intent, facts, notes=note_excerpts,
+        )
     hinted_action = _action_hint(query, product, intent)
     if hinted_action:
         action = hinted_action
+    if research_synthesis:
+        synthesis_ids = set(research_synthesis["evidence_ids"])
+        if research_synthesis["decision"] == "answer" and synthesis_ids:
+            action = "answer"
+        elif not research_synthesis["answerable"] and research_synthesis["decision"] in {"clarify", "escalate"}:
+            action = research_synthesis["decision"]
     # Deterministic safety gates override a model choice for high-risk text.
     if (_MUST_ESCALATE_RE.search(query) or _SECURITY_RE.search(query)) and not _SAFE_SETUP_SECURITY_RE.search(query):
         return {
@@ -1755,6 +1852,20 @@ def autonomous_decision(query, turns, product_hint=None, force_reply=False):
         draft_prompt += "\n\n" + history_prompt(historical_excerpts)
     if codebase_excerpts:
         draft_prompt += "\n\n" + codebase_prompt(codebase_excerpts)
+    if research_synthesis:
+        draft_prompt += (
+            "\n\n# DELIBERATIVE RESEARCH SYNTHESIS\n"
+            "Use this only as a working aid and verify it against the evidence IDs.\n"
+            "Decision: {}\nAnswerable: {}\nGrounded claims:\n{}\nGaps: {}\nConflicts: {}"
+        ).format(
+            research_synthesis["decision"], research_synthesis["answerable"],
+            "\n".join(
+                "- {} -> {}".format(item["claim"], ", ".join(item["evidence_ids"]))
+                for item in research_synthesis["claim_evidence"]
+            ) or "none",
+            "; ".join(research_synthesis["gaps"]) or "none",
+            "; ".join(research_synthesis["conflicts"]) or "none",
+        )
     draft = ask_json(
         draft_prompt,
         turns,
