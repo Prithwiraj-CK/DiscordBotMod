@@ -737,6 +737,7 @@ _started_at = None   # set in main(); the sweep will not reach back past it
 _bot = None          # discum client, built in main()
 _self_id = ""        # our own user snowflake, so we never answer ourselves
 _executor = None
+_memory_executor = None
 _stop = threading.Event()
 _conversation_memory = ConversationMemory()
 
@@ -2102,6 +2103,10 @@ def _answer(message):
     scope = _conversation_scope(message)
 
     try:
+        # Sweep-dispatched messages do not pass through the gateway capture;
+        # live messages are also upserted here so memory writes never depend on
+        # the gateway callback finishing first.
+        _remember_incoming(message)
         recent_turns = _recent_context(channel_id, message_id)
         memory_turns = (
             _conversation_memory.load(scope, exclude_message_id=message_id)
@@ -2612,7 +2617,8 @@ def _check_config():
 
 
 def main():
-    global _bot, _self_id, _executor, _started_at, ALLOWED_CHANNELS, _channel_names
+    global _bot, _self_id, _executor, _memory_executor
+    global _started_at, ALLOWED_CHANNELS, _channel_names
 
     _started_at = datetime.now(timezone.utc)
 
@@ -2654,6 +2660,7 @@ def main():
                  "  <- posts here" if cid == OUTPUT_CHANNEL_ID else "")
 
     _executor = ThreadPoolExecutor(max_workers=WORKER_THREADS, thread_name_prefix="answer")
+    _memory_executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="memory")
 
     # Discord's payloads have outgrown discum's unmaintained session-cache
     # parser. This listener only needs raw message events, not cached guild data.
@@ -2666,7 +2673,8 @@ def main():
             if not resp.event.message:
                 return
             message = resp.parsed.auto()
-            _remember_incoming(message)
+            if _memory_executor is not None:
+                _memory_executor.submit(_remember_incoming, message)
             if not _should_answer(message):
                 return
 
@@ -2693,6 +2701,8 @@ def main():
     finally:
         _stop.set()
         _executor.shutdown(wait=False)
+        if _memory_executor is not None:
+            _memory_executor.shutdown(wait=False)
 
     # gateway.run() returning means the connection is gone for good. Exit
     # non-zero so a supervisor actually restarts us instead of reading it as a
