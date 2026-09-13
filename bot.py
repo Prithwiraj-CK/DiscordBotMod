@@ -2430,7 +2430,7 @@ def _merge_conversation_context(memory_turns, recent_turns):
         seen.add(marker)
         turns.append({"role": role, "content": content})
 
-    budget = _env_int("CONVERSATION_CONTEXT_MAX_CHARS", 12000, minimum=1000)
+    budget = max(1000, _env_int("CONVERSATION_CONTEXT_MAX_CHARS", 12000))
     while len(turns) > 1 and sum(len(turn["content"]) for turn in turns) > budget:
         # Keep the compact summary when present, while dropping the oldest
         # detailed turn first. Recent Discord context is appended last.
