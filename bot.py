@@ -46,6 +46,7 @@ from codebase_search import (
     codebase_prompt, read_codebase_context, read_codebase_file,
     read_codebase_section, search_codebase,
 )
+from conversation_memory import ConversationMemory
 from knowledge import (
     history_prompt, load_knowledge, notes_prompt, retrieve_facts,
     retrieve_history, retrieve_notes,
@@ -737,6 +738,7 @@ _bot = None          # discum client, built in main()
 _self_id = ""        # our own user snowflake, so we never answer ourselves
 _executor = None
 _stop = threading.Event()
+_conversation_memory = ConversationMemory()
 
 
 def _guard_output(channel_id):
@@ -2097,9 +2099,15 @@ def _answer(message):
     author = message.get("author") or {}
     name = author.get("global_name") or author.get("username") or "user"
     text = (message.get("content") or "").strip()
+    scope = _conversation_scope(message)
 
     try:
-        turns = _recent_context(channel_id, message_id)
+        recent_turns = _recent_context(channel_id, message_id)
+        memory_turns = (
+            _conversation_memory.load(scope, exclude_message_id=message_id)
+            if scope else []
+        )
+        turns = _merge_conversation_context(memory_turns, recent_turns)
         readable = _readable(text, message)
         image_context = _extract_image_context(message)
         model_text = readable or "[user attached an image]"
@@ -2117,6 +2125,12 @@ def _answer(message):
         answer = _autonomous_response(
             analysis_query, turns, force_reply=_directly_addressed(message),
         )
+        if scope:
+            # This upgrades the raw gateway copy with OCR context and
+            # normalized mentions. The active id makes it an upsert.
+            _conversation_memory.append(
+                scope, "user", turns[-1]["content"], message_id=message_id,
+            )
     except Exception as exc:
         log.exception("Failed to answer message %s", message_id)
         _record_failure(message_id, channel_id, "{}: {}".format(type(exc).__name__, exc))
@@ -2194,6 +2208,10 @@ def _answer(message):
             "post answer for message {}".format(message_id),
             _bot.sendMessage, target, body, **kwargs
         )
+        if scope:
+            _conversation_memory.append(
+                scope, "assistant", answer, message_id="salena:{}".format(message_id),
+            )
     except DiscordCallFailed as exc:
         detail = str(exc)
         if "HTTP 404" in detail:
@@ -2337,6 +2355,83 @@ def _directly_addressed(message):
     referenced = message.get("referenced_message") or {}
     replied_author = str((referenced.get("author") or {}).get("id", "")) if referenced else ""
     return bool(tagged_self or (replied_author and replied_author == _self_id))
+
+
+def _conversation_scope(message):
+    """Build the Redis scope without joining unrelated users or tickets."""
+    author = message.get("author") or {}
+    channel_id = str(message.get("channel_id") or "")
+    user_id = str(author.get("id") or "")
+    if not channel_id or not user_id:
+        return None
+    thread = message.get("thread") or {}
+    thread_id = str(
+        message.get("thread_id")
+        or thread.get("id")
+        or channel_id
+    )
+    return {
+        "guild_id": str(message.get("guild_id") or GUILD_ID),
+        "channel_id": channel_id,
+        "thread_id": thread_id,
+        "user_id": user_id,
+    }
+
+
+def _memory_allowed(message):
+    """Mirror the read boundary used by _should_answer, without widening it."""
+    channel_id = str(message.get("channel_id") or "")
+    direct_target_in_configured_guild = (
+        str(message.get("guild_id") or "") == GUILD_ID
+        and _directly_addressed(message)
+    )
+    return channel_id in ALLOWED_CHANNELS or direct_target_in_configured_guild
+
+
+def _remember_incoming(message, content=None):
+    """Record only scoped human input; this never changes Discord reads."""
+    if not _conversation_memory.available or not _memory_allowed(message):
+        return
+    author = message.get("author") or {}
+    author_id = str(author.get("id") or "")
+    if not author_id or author_id == _self_id or author.get("bot"):
+        return
+    if not _conversation_memory.rememberable(message):
+        return
+    scope = _conversation_scope(message)
+    if not scope:
+        return
+    if content is None:
+        content = _readable(message.get("content") or "", message)
+        if not content and message.get("attachments"):
+            content = "[user attached an image]"
+    _conversation_memory.append(
+        scope, "user", content, message_id=str(message.get("id") or ""),
+    )
+
+
+def _merge_conversation_context(memory_turns, recent_turns):
+    """Combine Redis memory with Discord context under a bounded prompt budget."""
+    turns = []
+    seen = set()
+    for turn in list(memory_turns or []) + list(recent_turns or []):
+        role = turn.get("role")
+        content = str(turn.get("content") or "").strip()
+        if role not in ("user", "assistant") or not content:
+            continue
+        marker = (role, content)
+        if marker in seen:
+            continue
+        seen.add(marker)
+        turns.append({"role": role, "content": content})
+
+    budget = _env_int("CONVERSATION_CONTEXT_MAX_CHARS", 12000, minimum=1000)
+    while len(turns) > 1 and sum(len(turn["content"]) for turn in turns) > budget:
+        # Keep the compact summary when present, while dropping the oldest
+        # detailed turn first. Recent Discord context is appended last.
+        drop_at = 1 if turns[0]["content"].startswith("[SHORT-TERM CONVERSATION SUMMARY") else 0
+        turns.pop(drop_at)
+    return turns
 
 
 def _should_answer(message):
@@ -2553,6 +2648,7 @@ def main():
         _channel_names.get(OUTPUT_CHANNEL_ID, "bot-test"),
         OUTPUT_CHANNEL_ID,
     )
+    log.info("Short-term conversation memory: %s", _conversation_memory.status())
     for cid in sorted(ALLOWED_CHANNELS, key=lambda c: _channel_names.get(c, c)):
         log.info("    reads #%s%s", _channel_names.get(cid, cid),
                  "  <- posts here" if cid == OUTPUT_CHANNEL_ID else "")
@@ -2570,6 +2666,7 @@ def main():
             if not resp.event.message:
                 return
             message = resp.parsed.auto()
+            _remember_incoming(message)
             if not _should_answer(message):
                 return
 
