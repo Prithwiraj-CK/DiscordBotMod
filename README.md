@@ -110,14 +110,15 @@ image text is untrusted context and cannot override approved facts.
 If `CODEBASE_VALHALLA_PATH` and `CODEBASE_OLYMPUS_PATH` are configured and
 `CODEBASE_SEARCH_ENABLED=true`, product and workflow questions also investigate
 those two repositories locally. This is a separate opt-in because the selected
-excerpts are sent to OpenAI as model context. Research is read-only: it uses
-fixed roots, fixed-string searches, multiple evidence-review rounds, and
-bounded line-range reads; it excludes dependencies/generated files,
-logs/dumps/backups, and secret-shaped files, and redacts sensitive-looking
-values. The model has no shell or filesystem-write tool. Code excerpts can
-explain exact implementation behavior, but approved facts remain authoritative
-for fees, security, account-specific support, privacy, and product promises.
-It is disabled by default.
+excerpts are sent to OpenAI as model context. Research is read-only: semantic
+query expansion, keyword search, filename/symbol/route/command/heading search,
+one-hop local-reference following, complete bounded function/section reads,
+and multiple evidence-review rounds are used. It excludes dependencies,
+generated files, logs/dumps/backups, binary assets, and secret-shaped files,
+and redacts sensitive-looking values. The model has no shell or filesystem-write
+tool. Code excerpts can explain exact implementation behavior, but approved
+facts remain authoritative for fees, security, account-specific support,
+privacy, and product promises. It is disabled by default.
 
 ## How it works
 
@@ -127,10 +128,11 @@ message in an allowed channel
   → last N messages pulled for context
   → tagged images transcribed once as untrusted context
   → structured classifier chooses product, intent, risk and action
-  → compound questions get up to four focused evidence searches
+  → semantic query expansion plus keyword/filename/symbol/route/command search
+  → follow local references and read complete bounded functions or documentation sections
   → retrieve matching approved facts, Markdown notes, historical excerpts, and safe code excerpts
-  → review evidence and iteratively search/read more relevant repository material
-  → structured drafter cites evidence and validates its action
+  → compare frontend, backend, routes, and docs during iterative evidence review
+  → structured drafter maps each factual claim to evidence and validates its action
   → shadow proposal in the configured output channel, or autonomous handoff proposal
 ```
 

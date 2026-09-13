@@ -24,6 +24,9 @@ prefer the things users actually ask about over exhaustive internal detail:
 - known limitations and "no, that isn't supported"
 - what genuinely needs a human (account issues, payments, outages)
 
-Anything not written down here, the bot will escalate rather than guess.
-That's the intended behaviour — the fastest way to make it smarter is to add
-to these files, not to loosen the prompt.
+For product behavior questions, the bot can now perform safe read-only research
+in the configured Valhalla and Olympus repositories before escalating. Anything
+still unsupported after that research is escalated rather than guessed. Keep
+these files authoritative for policy, fees, security, privacy, and public
+product promises; repository code explains implementation behavior but does not
+override those facts.
