@@ -781,29 +781,41 @@ def _mark_gateway_error(error):
 
 def _install_gateway_health_hooks(gateway):
     """Observe discum transport callbacks while preserving its normal logic."""
-    original_open = gateway.on_open
-    original_error = gateway.on_error
-    original_close = gateway.on_close
+    # GatewayServer uses __slots__, so its callbacks cannot be replaced on an
+    # instance. WebSocketApp resolves gateway.on_* at call time, though, which
+    # lets us safely wrap the three methods on this process's class instead.
+    gateway_class = type(gateway)
+    if getattr(gateway_class, "_salena_gateway_health_hooks", False):
+        return
 
-    def on_open(ws):
-        _mark_gateway_signal("websocket opened")
-        return original_open(ws)
+    original_open = gateway_class.on_open
+    original_error = gateway_class.on_error
+    original_close = gateway_class.on_close
 
-    def on_error(ws, error):
-        _mark_gateway_error(error)
-        return original_error(ws, error)
+    def on_open(self, ws):
+        if _bot is not None and self is _bot.gateway:
+            _mark_gateway_signal("websocket opened")
+        return original_open(self, ws)
 
-    def on_close(ws, close_code, close_message):
-        _mark_gateway_error(
-            "websocket closed (code {}, reason {})".format(close_code, close_message)
-        )
-        return original_close(ws, close_code, close_message)
+    def on_error(self, ws, error):
+        if _bot is not None and self is _bot.gateway:
+            _mark_gateway_error(error)
+        return original_error(self, ws, error)
+
+    def on_close(self, ws, close_code, close_message):
+        if _bot is not None and self is _bot.gateway:
+            _mark_gateway_error(
+                "websocket closed (code {}, reason {})".format(close_code, close_message)
+            )
+        return original_close(self, ws, close_code, close_message)
 
     # WebSocketApp invokes these through lambdas that dereference gateway at
-    # call time, so replacing the methods after Client() construction is safe.
-    gateway.on_open = on_open
-    gateway.on_error = on_error
-    gateway.on_close = on_close
+    # call time, so replacing the class methods after Client() construction is
+    # safe and applies only for the lifetime of this process.
+    gateway_class.on_open = on_open
+    gateway_class.on_error = on_error
+    gateway_class.on_close = on_close
+    gateway_class._salena_gateway_health_hooks = True
 
 
 def _request_gateway_restart(reason):
