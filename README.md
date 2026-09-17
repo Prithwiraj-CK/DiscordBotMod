@@ -152,10 +152,11 @@ default.
 
 `REPOSITORY_SEARCH_BOTH=true` makes every non-social support question search
 both fixed repositories before drafting, so a wrong initial product classifier
-cannot hide an answer. `APPROVED_FACTS_ENABLED=false` disables the curated FAQ
-facts and deterministic FAQ shortcuts as answer sources for a repository-only
-shadow evaluation. It does **not** disable account-specific, secret, security,
-or money-risk escalation rules. Repository-only mode is useful for testing
+cannot hide an answer. `APPROVED_FACTS_ENABLED=true` keeps curated FAQ facts
+and deterministic FAQ shortcuts available for fees, product promises,
+onboarding, and security. Set it to `false` only for a repository-only shadow
+evaluation. It does **not** disable account-specific, secret, security, or
+money-risk escalation rules. Repository-only mode is useful for testing
 implementation questions, but it should not be considered a replacement for
 verified public-policy facts such as fees or product promises.
 

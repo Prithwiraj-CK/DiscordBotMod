@@ -184,7 +184,7 @@ CODEBASE_SEARCH_ENABLED = os.getenv("CODEBASE_SEARCH_ENABLED", "false").strip().
 REPOSITORY_SEARCH_BOTH = os.getenv("REPOSITORY_SEARCH_BOTH", "true").strip().lower() in (
     "1", "true", "yes", "on",
 )
-APPROVED_FACTS_ENABLED = os.getenv("APPROVED_FACTS_ENABLED", "false").strip().lower() in (
+APPROVED_FACTS_ENABLED = os.getenv("APPROVED_FACTS_ENABLED", "true").strip().lower() in (
     "1", "true", "yes", "on",
 )
 
