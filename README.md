@@ -72,10 +72,11 @@ loop on a WebSocket after that socket has closed. A healthy idle gateway still
 receives heartbeat acknowledgements, so if there is no gateway traffic for
 `GATEWAY_STALE_SECONDS` (180 seconds by default), the process exits and its
 launchd supervisor starts a new process with a new WebSocket. A closed socket
-with a recorded error is restarted after 30 seconds. `GATEWAY_RESTART_GRACE_SECONDS`
-(20 seconds by default) is the maximum time allowed for the clean shutdown
-before the supervisor restart is forced. The five-minute REST sweep remains a
-separate backup for messages that arrived during a reconnect.
+or any recorded transport error without later gateway traffic is restarted
+after 30 seconds. `GATEWAY_RESTART_GRACE_SECONDS` (20 seconds by default) is
+the maximum time allowed for the clean shutdown before the supervisor restart
+is forced. The five-minute REST sweep remains a separate backup for messages
+that arrived during a reconnect.
 
 ### 3. Add knowledge
 

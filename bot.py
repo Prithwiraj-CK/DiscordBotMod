@@ -872,11 +872,25 @@ def _gateway_watchdog():
 
         # A closed gateway with a recorded failure may be restarted earlier,
         # but leave a full heartbeat interval for a normal reconnection first.
+        # discum sometimes leaves connected=True after websocket-client emits
+        # "socket is already closed", so absence of any signal *after* the
+        # error is also treated as a failed reconnect.
         error_age = now - last_error if last_error else None
         if disconnected and error_age is not None and error_age >= 30:
             _request_gateway_restart(
                 "socket stayed disconnected for {:.0f}s after {}".format(
                     error_age, error_text or "an unknown error"
+                )
+            )
+            return
+        if (
+            error_age is not None
+            and error_age >= 30
+            and last_signal <= last_error
+        ):
+            _request_gateway_restart(
+                "no recovery traffic for {:.0f}s after {}".format(
+                    error_age, error_text or "an unknown gateway error"
                 )
             )
             return
