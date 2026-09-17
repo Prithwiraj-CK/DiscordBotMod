@@ -145,9 +145,19 @@ one-hop local-reference following, complete bounded function/section reads,
 and multiple evidence-review rounds are used. It excludes dependencies,
 generated files, logs/dumps/backups, binary assets, and secret-shaped files,
 and redacts sensitive-looking values. The model has no shell or filesystem-write
-tool. Code excerpts can explain exact implementation behavior, but approved
-facts remain authoritative for fees, security, account-specific support,
-privacy, and product promises. It is disabled by default.
+tool. Code excerpts can explain exact implementation behavior; when enabled,
+approved facts remain authoritative for fees, security, account-specific
+support, privacy, and product promises. Repository search is disabled by
+default.
+
+`REPOSITORY_SEARCH_BOTH=true` makes every non-social support question search
+both fixed repositories before drafting, so a wrong initial product classifier
+cannot hide an answer. `APPROVED_FACTS_ENABLED=false` disables the curated FAQ
+facts and deterministic FAQ shortcuts as answer sources for a repository-only
+shadow evaluation. It does **not** disable account-specific, secret, security,
+or money-risk escalation rules. Repository-only mode is useful for testing
+implementation questions, but it should not be considered a replacement for
+verified public-policy facts such as fees or product promises.
 
 ## How it works
 

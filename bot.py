@@ -176,6 +176,18 @@ CODEBASE_SEARCH_ENABLED = os.getenv("CODEBASE_SEARCH_ENABLED", "false").strip().
     "1", "true", "yes", "on",
 )
 
+# Repository-first mode is for implementation/workflow support: investigate
+# both fixed product roots before drafting instead of assuming the router chose
+# the right product. The approved-fact corpus can be switched off as an answer
+# source for a shadow evaluation, but hard account/security/secret safeguards
+# below remain enforced regardless of this setting.
+REPOSITORY_SEARCH_BOTH = os.getenv("REPOSITORY_SEARCH_BOTH", "true").strip().lower() in (
+    "1", "true", "yes", "on",
+)
+APPROVED_FACTS_ENABLED = os.getenv("APPROVED_FACTS_ENABLED", "false").strip().lower() in (
+    "1", "true", "yes", "on",
+)
+
 # ---------------------------------------------------------------------------
 # Where she reads, and the one place she writes.
 #
@@ -1594,9 +1606,11 @@ def _intent_hint(query):
 
 
 def _should_search_codebase(query, intent):
-    """Search implementation sources for product/workflow questions only."""
-    if intent in {"social", "performance"}:
+    """Research every non-social support question when repository mode is on."""
+    if intent in {"social", "addressed_to_staff", "security"}:
         return False
+    if REPOSITORY_SEARCH_BOTH:
+        return len((query or "").strip()) >= 4
     return bool(re.search(
         r"\b(how|where|which|what|setting|settings|command|configure|"
         r"default|support|work|works|implemented|implementation|error|"
@@ -1605,6 +1619,20 @@ def _should_search_codebase(query, intent):
         query or "",
         re.IGNORECASE,
     ))
+
+
+def _repository_products(search_product, search_query):
+    """Choose only fixed repository roots; a model never chooses filesystem paths."""
+    if REPOSITORY_SEARCH_BOTH:
+        return ("valhalla", "olympus")
+    if search_product in {"valhalla", "olympus"}:
+        return (search_product,)
+    lowered = (search_query or "").lower()
+    if "valhalla" in lowered:
+        return ("valhalla",)
+    if "olympus" in lowered:
+        return ("olympus",)
+    return ()
 
 
 def _plan_searches(query, product, intent):
@@ -1860,32 +1888,30 @@ def autonomous_decision(query, turns, product_hint=None, force_reply=False):
 
     def collect_search(search_query, search_product, search_intent):
         """Collect one bounded search without letting the model choose paths."""
-        for fact in retrieve_facts(
-            search_query, product=search_product, intent=search_intent, limit=10,
-        ):
-            facts_by_id[str(fact.get("id", ""))] = fact
-        codebase_product = search_product
-        if codebase_product not in {"valhalla", "olympus"}:
-            lowered_search = search_query.lower()
-            if "valhalla" in lowered_search:
-                codebase_product = "valhalla"
-            elif "olympus" in lowered_search:
-                codebase_product = "olympus"
-        if CODEBASE_SEARCH_ENABLED and codebase_product in {"valhalla", "olympus"} and _should_search_codebase(
-            search_query, search_intent,
-        ):
-            for excerpt in search_codebase(search_query, codebase_product, limit=32):
-                codebase_by_id[str(excerpt.get("id", ""))] = excerpt
-            # Turn isolated hits into complete bounded functions or document
-            # sections before the evidence reviewer decides what matters.
-            for excerpt in list(codebase_by_id.values())[-8:]:
-                if excerpt.get("product") != codebase_product or not excerpt.get("path"):
-                    continue
-                section = read_codebase_section(
-                    codebase_product, excerpt.get("path", ""), excerpt.get("line", 1),
-                )
-                if section:
-                    codebase_by_id[str(section.get("id", ""))] = section
+        if APPROVED_FACTS_ENABLED:
+            for fact in retrieve_facts(
+                search_query, product=search_product, intent=search_intent, limit=10,
+            ):
+                facts_by_id[str(fact.get("id", ""))] = fact
+        if CODEBASE_SEARCH_ENABLED and _should_search_codebase(search_query, search_intent):
+            for codebase_product in _repository_products(search_product, search_query):
+                before_ids = set(codebase_by_id)
+                for excerpt in search_codebase(search_query, codebase_product, limit=32):
+                    codebase_by_id[str(excerpt.get("id", ""))] = excerpt
+                # Turn isolated hits into complete bounded functions or document
+                # sections before the evidence reviewer decides what matters.
+                new_items = [
+                    item for evidence_id, item in codebase_by_id.items()
+                    if evidence_id not in before_ids
+                ]
+                for excerpt in new_items[:8]:
+                    if excerpt.get("product") != codebase_product or not excerpt.get("path"):
+                        continue
+                    section = read_codebase_section(
+                        codebase_product, excerpt.get("path", ""), excerpt.get("line", 1),
+                    )
+                    if section:
+                        codebase_by_id[str(section.get("id", ""))] = section
         for note in retrieve_notes(search_query, product=search_product, limit=12):
             notes_by_key[(note.get("source", ""), note.get("text", ""))] = note
         for excerpt in retrieve_history(search_query, product=search_product, limit=12):
@@ -1904,7 +1930,7 @@ def autonomous_decision(query, turns, product_hint=None, force_reply=False):
     # discrepancy reports, where guessing is more harmful than handoff.
     review_allowed = (
         CODEBASE_SEARCH_ENABLED
-        and product in {"valhalla", "olympus"}
+        and bool(codebase_by_id)
         and intent not in {"social", "addressed_to_staff"}
         and (action != "ignore" or force_reply)
         and not _SECURITY_RE.search(query)
@@ -1947,13 +1973,13 @@ def autonomous_decision(query, turns, product_hint=None, force_reply=False):
                     continue
                 seen_reads.add(evidence_id)
                 context = read_codebase_section(
-                    product,
+                    excerpt.get("product"),
                     excerpt.get("path", ""),
                     excerpt.get("line", 0),
                 )
                 if not context:
                     context = read_codebase_context(
-                        product, excerpt.get("path", ""), excerpt.get("line", 0), radius=5,
+                        excerpt.get("product"), excerpt.get("path", ""), excerpt.get("line", 0), radius=5,
                     )
                 if context and str(context["id"]) not in codebase_by_id:
                     codebase_by_id[str(context["id"])] = context
@@ -2006,7 +2032,7 @@ def autonomous_decision(query, turns, product_hint=None, force_reply=False):
     fact_ids = {str(fact.get("id", "")) for fact in facts}
     research_synthesis = None
     if (
-        product in {"valhalla", "olympus"}
+        facts
         and intent not in {"social", "addressed_to_staff"}
         and not _SECURITY_RE.search(query)
         and not _DISCREPANCY_RE.search(query)
@@ -2036,7 +2062,7 @@ def autonomous_decision(query, turns, product_hint=None, force_reply=False):
     # approved answer evidence was found, let the drafter test that evidence
     # before handing off. Account, security, discrepancy, and money cases have
     # already been returned above and remain forced escalations.
-    if action == "escalate" and product in {"valhalla", "olympus"}:
+    if action == "escalate" and codebase_excerpts:
         has_complete_code = any(
             str(item.get("source_type", "")) in {"codebase_section", "codebase_file", "codebase_context"}
             for item in facts
@@ -2087,7 +2113,7 @@ def autonomous_decision(query, turns, product_hint=None, force_reply=False):
             "action": "escalate", "product": product, "intent": intent,
             "risk": "high", "confidence": route.get("confidence", 0),
             "evidence_ids": [], "missing_information": [],
-            "draft_answer": ESCALATE, "unsupported_claims": ["no approved evidence matched"],
+            "draft_answer": ESCALATE, "unsupported_claims": ["no repository evidence matched"],
         }
 
     draft_prompt = (
@@ -2126,7 +2152,10 @@ def autonomous_decision(query, turns, product_hint=None, force_reply=False):
         temperature=0.2,
     )
     draft_action = draft.get("action")
-    known_answer = _known_safe_answer(query, product, facts) if action == "answer" else ""
+    known_answer = (
+        _known_safe_answer(query, product, facts)
+        if APPROVED_FACTS_ENABLED and action == "answer" else ""
+    )
     if known_answer:
         draft_action = "answer"
         draft["draft_answer"] = known_answer
@@ -2909,6 +2938,11 @@ def main():
         OUTPUT_CHANNEL_ID,
     )
     log.info("Short-term conversation memory: %s", _conversation_memory.status())
+    log.info(
+        "Answer research: repositories=%s, approved facts as answer source=%s",
+        "Valhalla + Olympus" if REPOSITORY_SEARCH_BOTH else "router-selected product",
+        "enabled" if APPROVED_FACTS_ENABLED else "disabled",
+    )
     for cid in sorted(ALLOWED_CHANNELS, key=lambda c: _channel_names.get(c, c)):
         log.info("    reads #%s%s", _channel_names.get(cid, cid),
                  "  <- posts here" if cid == OUTPUT_CHANNEL_ID else "")
