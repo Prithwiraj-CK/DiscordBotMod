@@ -31,6 +31,7 @@ import os
 import random
 import re
 import time
+import zlib
 from difflib import SequenceMatcher
 import threading
 from collections import OrderedDict, deque
@@ -41,6 +42,10 @@ from urllib.parse import urlparse
 import discum
 import requests
 from dotenv import load_dotenv
+from discum.gateway.gateway import (
+    ConnectionManuallyClosedException,
+    ConnectionResumableException,
+)
 
 from alerts import alert
 from codebase_search import (
@@ -780,7 +785,7 @@ def _mark_gateway_error(error):
 
 
 def _install_gateway_health_hooks(gateway):
-    """Observe discum transport callbacks while preserving its normal logic."""
+    """Harden discum's transport callbacks and reconnect behavior in-process."""
     # GatewayServer uses __slots__, so its callbacks cannot be replaced on an
     # instance. WebSocketApp resolves gateway.on_* at call time, though, which
     # lets us safely wrap the three methods on this process's class instead.
@@ -791,6 +796,7 @@ def _install_gateway_health_hooks(gateway):
     original_open = gateway_class.on_open
     original_error = gateway_class.on_error
     original_close = gateway_class.on_close
+    original_run = gateway_class.run
 
     def on_open(self, ws):
         if _bot is not None and self is _bot.gateway:
@@ -809,12 +815,78 @@ def _install_gateway_health_hooks(gateway):
             )
         return original_close(self, ws, close_code, close_message)
 
+    def run(self, auto_reconnect=True):
+        """Run discum with a fresh WebSocket after every dropped connection.
+
+        discum 1.4.1 creates WebSocketApp once in GatewayServer.__init__ and
+        invokes run_forever on that same object after a close. websocket-client
+        quite correctly rejects that with "socket is already closed", leaving
+        the listener in an endless retry loop. This preserves discum's session
+        resume/reset behavior but creates a new WebSocketApp before retrying.
+        """
+        if not auto_reconnect:
+            return original_run(self, auto_reconnect=False)
+
+        websocket_url = getattr(self.ws, "url", "")
+        if not websocket_url:
+            # Do not guess at a private discum implementation detail. Its
+            # native behavior is safer than constructing a malformed URL.
+            return original_run(self, auto_reconnect=True)
+
+        while True:
+            try:
+                self._zlib = zlib.decompressobj()
+                self.ws.run_forever(
+                    ping_interval=10,
+                    ping_timeout=5,
+                    http_proxy_host=self.proxy_host,
+                    http_proxy_port=self.proxy_port,
+                    http_proxy_auth=self.proxy_auth,
+                    proxy_type=self.proxy_type,
+                    **self.connectionKwargs
+                )
+                if self._last_err is None:
+                    raise RuntimeError("Discord gateway stopped without a close reason")
+                raise self._last_err
+            except KeyboardInterrupt:
+                self._last_err = KeyboardInterrupt("Keyboard Interrupt Error")
+                log.info("Discord gateway interrupted, shutting down")
+                break
+            except Exception as exc:
+                if isinstance(exc, ConnectionResumableException):
+                    self._last_err = None
+                    wait_seconds = random.randrange(1, 6)
+                    log.warning(
+                        "Discord gateway dropped; resuming with a fresh socket in %ss",
+                        wait_seconds,
+                    )
+                elif isinstance(exc, ConnectionManuallyClosedException):
+                    log.info("Discord gateway closed on request")
+                    break
+                else:
+                    self.resetSession()
+                    wait_seconds = 10
+                    log.warning(
+                        "Discord gateway dropped (%s); reconnecting with a fresh socket in %ss",
+                        exc, wait_seconds,
+                    )
+
+                try:
+                    self.ws = self._get_ws_app(websocket_url)
+                except Exception as socket_exc:
+                    # The watchdog remains the final backstop if a new socket
+                    # cannot even be constructed.
+                    _mark_gateway_error(socket_exc)
+                    log.warning("Could not create replacement Discord socket: %s", socket_exc)
+                time.sleep(wait_seconds)
+
     # WebSocketApp invokes these through lambdas that dereference gateway at
     # call time, so replacing the class methods after Client() construction is
     # safe and applies only for the lifetime of this process.
     gateway_class.on_open = on_open
     gateway_class.on_error = on_error
     gateway_class.on_close = on_close
+    gateway_class.run = run
     gateway_class._salena_gateway_health_hooks = True
 
 
