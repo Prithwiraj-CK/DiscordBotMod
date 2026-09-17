@@ -677,6 +677,18 @@ ask staff for approval.
 APPROVED EVIDENCE AND READ-ONLY CODEBASE EXCERPTS
 """
 
+CITATION_REPAIR_SYSTEM = """Repair only the evidence metadata for a drafted
+support response. The answer text and action are already chosen: copy both
+exactly, character-for-character, and do not add, remove, or rephrase a claim.
+Replace invalid evidence IDs with IDs from the supplied evidence only when they
+actually support the same claim. Never cite a filename, documentation title,
+HISTORY ID, URL, or an ID not supplied below. If the supplied evidence cannot
+support the existing answer, return an empty evidence_ids list and empty
+claim_evidence list. This is citation repair, not a second chance to answer.
+
+SUPPLIED EVIDENCE
+"""
+
 REASONING_SYSTEM = """Act as a deliberate research analyst for an autonomous product-support response.
 Do not write the user-facing answer and do not reveal private chain-of-thought.
 Return only a concise structured synthesis of the evidence supplied below.
@@ -1844,6 +1856,81 @@ def _claim_is_in_evidence(claim, facts):
     return False
 
 
+def _normalise_draft_evidence(draft):
+    """Keep only well-formed citations and return every ID the draft uses."""
+    claim_entries = []
+    for item in draft.get("claim_evidence", []):
+        if not isinstance(item, dict):
+            continue
+        claim = str(item.get("claim") or "").strip()
+        ids = {str(value) for value in item.get("evidence_ids", [])}
+        if claim:
+            claim_entries.append({"claim": claim, "evidence_ids": sorted(ids)})
+    draft["claim_evidence"] = claim_entries
+    used_ids = {str(value) for value in draft.get("evidence_ids", [])}
+    for item in claim_entries:
+        used_ids.update(item["evidence_ids"])
+    draft["evidence_ids"] = sorted(used_ids)
+    return used_ids
+
+
+def _repair_invalid_citations(draft, draft_action, facts, invalid_ids):
+    """Map a valid draft's bad citation labels back to retrieved evidence once.
+
+    A filename such as ``valhalla.md`` or a ``HISTORY`` label is sometimes a
+    useful model-side mnemonic, but it is not an auditable evidence ID. Repair
+    only the metadata and reject any attempt to alter the user-facing answer.
+    """
+    answer = (draft.get("draft_answer") or "").strip()
+    if not answer or draft_action not in {"answer", "clarify"}:
+        return None
+    # Format the variable portion separately so the system prompt never treats
+    # a user answer or history label as an instruction.
+    repair_prompt = (
+        CITATION_REPAIR_SYSTEM
+        + _evidence_text(facts)
+        + "\n\nACTION TO PRESERVE: {}"
+        + "\nINVALID CITATIONS TO REPLACE: {}"
+        + "\n\nDRAFT RESPONSE (COPY EXACTLY):\n{}"
+        + "\n\nCURRENT CLAIM-TO-EVIDENCE MAP:\n{}"
+    ).format(
+        draft_action,
+        ", ".join(sorted(invalid_ids)),
+        answer,
+        "\n".join(
+            "- {} -> {}".format(item.get("claim", ""), ", ".join(item.get("evidence_ids", [])))
+            for item in draft.get("claim_evidence", [])
+            if isinstance(item, dict)
+        ) or "(none)",
+    )
+    try:
+        repaired = ask_json(
+            repair_prompt,
+            [{"role": "user", "content": "Repair citations for this response."}],
+            DRAFT_SCHEMA,
+            name="support_citation_repair",
+            temperature=0.0,
+        )
+    except Exception as exc:
+        log.warning("Citation repair unavailable; keeping original rejection: %s", exc)
+        return None
+
+    if repaired.get("action") != draft_action:
+        log.warning("Citation repair changed the action; rejecting repair")
+        return None
+    if (repaired.get("draft_answer") or "").strip() != answer:
+        log.warning("Citation repair changed the answer text; rejecting repair")
+        return None
+
+    repaired_ids = _normalise_draft_evidence(repaired)
+    allowed_ids = {str(fact.get("id", "")) for fact in facts}
+    if not repaired_ids or not repaired_ids.issubset(allowed_ids):
+        log.warning("Citation repair did not produce valid retrieved evidence IDs")
+        return None
+    log.info("Repaired %s invalid citation(s)", len(invalid_ids))
+    return repaired
+
+
 def autonomous_decision(query, turns, product_hint=None, force_reply=False):
     """Return the autonomous routing decision and its validation metadata."""
     # Small talk is deterministic and does not need product retrieval. Keeping
@@ -2206,19 +2293,7 @@ def autonomous_decision(query, turns, product_hint=None, force_reply=False):
         )
         draft["evidence_ids"] = []
         draft["claim_evidence"] = []
-    claim_entries = []
-    for item in draft.get("claim_evidence", []):
-        if not isinstance(item, dict):
-            continue
-        claim = str(item.get("claim") or "").strip()
-        ids = {str(value) for value in item.get("evidence_ids", [])}
-        if claim:
-            claim_entries.append({"claim": claim, "evidence_ids": sorted(ids)})
-    draft["claim_evidence"] = claim_entries
-    used_ids = {str(value) for value in draft.get("evidence_ids", [])}
-    for item in claim_entries:
-        used_ids.update(item["evidence_ids"])
-    draft["evidence_ids"] = sorted(used_ids)
+    used_ids = _normalise_draft_evidence(draft)
     if draft_action not in {"answer", "clarify"}:
         effective_action = "escalate" if draft_action == "escalate" else "ignore"
         return {
@@ -2230,14 +2305,20 @@ def autonomous_decision(query, turns, product_hint=None, force_reply=False):
             "unsupported_claims": [],
         }
     if not used_ids.issubset(fact_ids):
-        log.warning("Rejected draft with evidence outside retrieval set: %s", used_ids - fact_ids)
-        return {
-            "action": "escalate", "product": product, "intent": intent,
-            "risk": "critical", "confidence": route.get("confidence", 0),
-            "evidence_ids": sorted(used_ids & fact_ids),
-            "missing_information": [], "draft_answer": ESCALATE,
-            "unsupported_claims": ["evidence outside retrieval set"],
-        }
+        invalid_ids = used_ids - fact_ids
+        repaired = _repair_invalid_citations(draft, draft_action, facts, invalid_ids)
+        if repaired is not None:
+            draft = repaired
+            used_ids = _normalise_draft_evidence(draft)
+        if not used_ids.issubset(fact_ids):
+            log.warning("Rejected draft with evidence outside retrieval set: %s", used_ids - fact_ids)
+            return {
+                "action": "escalate", "product": product, "intent": intent,
+                "risk": "critical", "confidence": route.get("confidence", 0),
+                "evidence_ids": sorted(used_ids & fact_ids),
+                "missing_information": [], "draft_answer": ESCALATE,
+                "unsupported_claims": ["evidence outside retrieval set"],
+            }
     if draft_action == "answer" and not used_ids and intent not in {"social", "unknown"}:
         return {
             "action": "escalate", "product": product, "intent": intent,
