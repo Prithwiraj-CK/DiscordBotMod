@@ -854,7 +854,7 @@ class DiscordCallFailed(RuntimeError):
 
 
 def _call(description, func, *args, **kwargs):
-    """Run one REST call, honouring 429s.
+    """Run one REST call, honouring rate limits and temporary Discord errors.
 
     discum does not retry rate limits for us. A user account that ignores
     Retry-After is a user account that gets flagged, so this waits the interval
@@ -885,6 +885,21 @@ def _call(description, func, *args, **kwargs):
             retry_after = min(retry_after, 30.0)
             log.warning("Rate limited on %s, waiting %.1fs", description, retry_after)
             if _stop.wait(retry_after):
+                raise DiscordCallFailed("{} aborted during shutdown".format(description))
+            continue
+
+        # A 5xx response is Discord (or its edge network) being temporarily
+        # unavailable, not a malformed request. The catch-up sweep is our
+        # safety net for missed gateway events, so retry a bounded number of
+        # times before skipping this pass. Jitter keeps several restarts from
+        # retrying in lockstep.
+        if status in (500, 502, 503, 504) and attempt < 2:
+            wait_seconds = min(15.0, (2 ** attempt) + random.uniform(0, 1))
+            log.warning(
+                "Discord returned HTTP %s for %s; retrying in %.1fs",
+                status, description, wait_seconds,
+            )
+            if _stop.wait(wait_seconds):
                 raise DiscordCallFailed("{} aborted during shutdown".format(description))
             continue
 
