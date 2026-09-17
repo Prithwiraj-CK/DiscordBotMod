@@ -30,6 +30,7 @@ import json
 import os
 import random
 import re
+import time
 from difflib import SequenceMatcher
 import threading
 from collections import OrderedDict, deque
@@ -117,6 +118,16 @@ CONTEXT_MESSAGES = _env_int("CONTEXT_MESSAGES", 8)
 SWEEP_MINUTES = max(0.5, _env_float("SWEEP_MINUTES", 5))
 SWEEP_LOOKBACK_MINUTES = _env_float("SWEEP_LOOKBACK_MINUTES", 30)
 SWEEP_MAX_REPLIES = _env_int("SWEEP_MAX_REPLIES", 5)
+
+# discum is unmaintained and, after a dropped socket, retries the same closed
+# WebSocket object forever. A healthy Discord gateway emits heartbeat ACKs,
+# even in a quiet server, so an absence of gateway traffic is safe evidence
+# that this process is no longer listening. The watchdog below asks launchd to
+# start a fresh process (and therefore a fresh WebSocket) when that happens.
+GATEWAY_STALE_SECONDS = max(90.0, _env_float("GATEWAY_STALE_SECONDS", 180))
+GATEWAY_RESTART_GRACE_SECONDS = max(
+    5.0, _env_float("GATEWAY_RESTART_GRACE_SECONDS", 20)
+)
 
 # Whether the sweep may answer messages that predate this process.
 # Off by default, and it must stay off unless you really want it: with it on,
@@ -740,6 +751,131 @@ _executor = None
 _memory_executor = None
 _stop = threading.Event()
 _conversation_memory = ConversationMemory()
+
+# Gateway health must not depend on a message being sent. Discord sends
+# heartbeat ACKs on a healthy idle connection, so the event callback records
+# all gateway traffic before filtering for MESSAGE_CREATE.
+_gateway_health_lock = threading.Lock()
+_gateway_started_monotonic = 0.0
+_gateway_last_signal_monotonic = 0.0
+_gateway_last_error_monotonic = 0.0
+_gateway_last_error = ""
+_gateway_restart_requested = threading.Event()
+
+
+def _mark_gateway_signal(source):
+    """Record a gateway liveness signal without doing work on its thread."""
+    global _gateway_last_signal_monotonic
+    with _gateway_health_lock:
+        _gateway_last_signal_monotonic = time.monotonic()
+    log.debug("Gateway liveness signal: %s", source)
+
+
+def _mark_gateway_error(error):
+    """Keep the most recent transport failure for the watchdog's diagnosis."""
+    global _gateway_last_error_monotonic, _gateway_last_error
+    with _gateway_health_lock:
+        _gateway_last_error_monotonic = time.monotonic()
+        _gateway_last_error = str(error or "unknown gateway error")[:300]
+
+
+def _install_gateway_health_hooks(gateway):
+    """Observe discum transport callbacks while preserving its normal logic."""
+    original_open = gateway.on_open
+    original_error = gateway.on_error
+    original_close = gateway.on_close
+
+    def on_open(ws):
+        _mark_gateway_signal("websocket opened")
+        return original_open(ws)
+
+    def on_error(ws, error):
+        _mark_gateway_error(error)
+        return original_error(ws, error)
+
+    def on_close(ws, close_code, close_message):
+        _mark_gateway_error(
+            "websocket closed (code {}, reason {})".format(close_code, close_message)
+        )
+        return original_close(ws, close_code, close_message)
+
+    # WebSocketApp invokes these through lambdas that dereference gateway at
+    # call time, so replacing the methods after Client() construction is safe.
+    gateway.on_open = on_open
+    gateway.on_error = on_error
+    gateway.on_close = on_close
+
+
+def _request_gateway_restart(reason):
+    """Exit through launchd after a stale socket; never recreate it in place."""
+    if _gateway_restart_requested.is_set() or _stop.is_set():
+        return
+    _gateway_restart_requested.set()
+    log.error("Gateway watchdog requesting supervised restart: %s", reason)
+    alert("Gateway unhealthy; restarting listener: {}".format(reason), key="gateway-unhealthy")
+
+    try:
+        if _bot is not None:
+            _bot.gateway.close()
+    except Exception as exc:
+        # The socket is already broken; the hard-stop backup below still lets
+        # launchd replace the whole process with a new socket.
+        log.warning("Could not close unhealthy gateway cleanly: %s", exc)
+
+    def force_restart_if_needed():
+        if _stop.wait(GATEWAY_RESTART_GRACE_SECONDS):
+            return
+        log.critical(
+            "Gateway did not stop within %.0fs; forcing supervised restart",
+            GATEWAY_RESTART_GRACE_SECONDS,
+        )
+        os._exit(4)
+
+    threading.Thread(
+        target=force_restart_if_needed,
+        name="gateway-restart-failsafe",
+        daemon=True,
+    ).start()
+
+
+def _gateway_watchdog():
+    """Restart only when the gateway has stopped proving it is alive."""
+    while not _stop.wait(5):
+        gateway = _bot.gateway if _bot is not None else None
+        if gateway is None or _gateway_restart_requested.is_set():
+            continue
+
+        now = time.monotonic()
+        with _gateway_health_lock:
+            started = _gateway_started_monotonic
+            last_signal = _gateway_last_signal_monotonic
+            last_error = _gateway_last_error_monotonic
+            error_text = _gateway_last_error
+
+        reference = last_signal or started
+        if not reference:
+            continue
+        silent_for = now - reference
+        disconnected = not bool(getattr(gateway, "connected", False))
+
+        # A closed gateway with a recorded failure may be restarted earlier,
+        # but leave a full heartbeat interval for a normal reconnection first.
+        error_age = now - last_error if last_error else None
+        if disconnected and error_age is not None and error_age >= 30:
+            _request_gateway_restart(
+                "socket stayed disconnected for {:.0f}s after {}".format(
+                    error_age, error_text or "an unknown error"
+                )
+            )
+            return
+        if silent_for >= GATEWAY_STALE_SECONDS:
+            _request_gateway_restart(
+                "no gateway traffic for {:.0f}s{}".format(
+                    silent_for,
+                    " after {}".format(error_text) if error_text else "",
+                )
+            )
+            return
 
 
 def _guard_output(channel_id):
@@ -2634,8 +2770,12 @@ def _check_config():
 def main():
     global _bot, _self_id, _executor, _memory_executor
     global _started_at, ALLOWED_CHANNELS, _channel_names
+    global _gateway_started_monotonic, _gateway_last_signal_monotonic
 
     _started_at = datetime.now(timezone.utc)
+    with _gateway_health_lock:
+        _gateway_started_monotonic = time.monotonic()
+        _gateway_last_signal_monotonic = _gateway_started_monotonic
 
     problems = _check_config()
     if problems:
@@ -2660,6 +2800,7 @@ def main():
 
     _bot = discum.Client(token=TOKEN, log=False)
     _bot.gateway.updateSessionData = False
+    _install_gateway_health_hooks(_bot.gateway)
 
     ALLOWED_CHANNELS, _channel_names = _resolve_watched()
     log.info(
@@ -2685,6 +2826,7 @@ def main():
         # Runs on the gateway thread. Return fast and never raise: blocking
         # here stalls the heartbeat, and raising kills the connection.
         try:
+            _mark_gateway_signal("gateway event")
             if not resp.event.message:
                 return
             message = resp.parsed.auto()
@@ -2702,11 +2844,17 @@ def main():
 
     sweeper = threading.Thread(target=_sweep_forever, name="sweep", daemon=True)
     sweeper.start()
+    watchdog = threading.Thread(target=_gateway_watchdog, name="gateway-watchdog", daemon=True)
+    watchdog.start()
     log.info(
         "Catch-up sweep running every %s min (%s)",
         SWEEP_MINUTES,
         "backfilling history from before startup" if SWEEP_BACKFILL
         else "new messages only, no backfill on start",
+    )
+    log.info(
+        "Gateway watchdog will restart a stale connection after %.0fs",
+        GATEWAY_STALE_SECONDS,
     )
 
     try:

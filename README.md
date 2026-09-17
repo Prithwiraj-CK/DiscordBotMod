@@ -65,6 +65,18 @@ The memory path does not widen the Discord read allowlist or the output-channel
 guard. For local use, start Redis and set
 `REDIS_URL=redis://127.0.0.1:6379/0` in `.env`.
 
+### Gateway recovery
+
+The Discord listener has a watchdog because the legacy `discum` client can
+loop on a WebSocket after that socket has closed. A healthy idle gateway still
+receives heartbeat acknowledgements, so if there is no gateway traffic for
+`GATEWAY_STALE_SECONDS` (180 seconds by default), the process exits and its
+launchd supervisor starts a new process with a new WebSocket. A closed socket
+with a recorded error is restarted after 30 seconds. `GATEWAY_RESTART_GRACE_SECONDS`
+(20 seconds by default) is the maximum time allowed for the clean shutdown
+before the supervisor restart is forced. The five-minute REST sweep remains a
+separate backup for messages that arrived during a reconnect.
+
 ### 3. Add knowledge
 
 Drop `valhalla.md` and `olympus.md` into `knowledge/`. See `knowledge/README.md`.
