@@ -1429,6 +1429,7 @@ _SECURITY_RE = re.compile(
 
 
 _INTENT_HINTS = (
+    (re.compile(r"\b(nft|decoder|subscription|monthly|membership|premium)\b", re.IGNORECASE), "onboarding"),
     (re.compile(r"\b(referral|invite|invitation|code)\b", re.IGNORECASE), "onboarding"),
     (re.compile(r"\b(welcome bonus|referral commission|seven days)\b", re.IGNORECASE), "onboarding"),
     (re.compile(r"\b(pnl|current value|fees earned|deposited amount|claimed fees)\b", re.IGNORECASE), "performance"),
@@ -1599,6 +1600,10 @@ def _known_safe_answer(query, product, facts):
     fact_map = {str(fact.get("id")): fact for fact in facts}
 
     if product == "valhalla":
+        if re.search(r"\b(nft|decoder|subscription|monthly|membership|premium)\b", lowered):
+            access_fact = fact_map.get("valhalla.access.nft_subscription_optional", {}).get("fact", "")
+            if access_fact:
+                return access_fact
         if re.search(r"\b(start|get started|begin|onboard)\b", lowered):
             return "Run `/valhalla start` in Discord, or start from the Valhalla website: https://valhalla-bot.app/."
         if re.search(r"\b(video|tutorial|walkthrough)\b", lowered) and re.search(
@@ -1652,6 +1657,62 @@ def _intent_hint(query):
         if pattern.search(query):
             return intent
     return None
+
+
+def _context_product_hint(query, turns):
+    """Infer a product from the current message and its bounded conversation.
+
+    Short follow-ups such as "DLMM copy trading" are meaningful only in the
+    context of the question immediately before them.  This is a routing hint,
+    never a product fact, and an explicit source-channel hint still wins.
+    """
+    valhalla_terms = re.compile(
+        r"\b(valhalla|dlmm|meteora|jupiter|jup(?:iter)?\s+score|/valhalla)\b",
+        re.IGNORECASE,
+    )
+    olympus_terms = re.compile(
+        r"\b(olympus|dimes|gasless|polymarket|sports?\s+(?:market|trade|bet))\b",
+        re.IGNORECASE,
+    )
+
+    def score(text):
+        value = str(text or "")
+        return len(valhalla_terms.findall(value)), len(olympus_terms.findall(value))
+
+    # The current message should outweigh older turns.  The last six turns are
+    # deliberately enough for a clarification exchange but cannot leak an
+    # unrelated earlier ticket into the route.
+    valhalla_score, olympus_score = score(query)
+    valhalla_score *= 4
+    olympus_score *= 4
+    for turn in list(turns or [])[-6:]:
+        candidate_valhalla, candidate_olympus = score(turn.get("content", ""))
+        valhalla_score += candidate_valhalla
+        olympus_score += candidate_olympus
+
+    if valhalla_score > olympus_score and valhalla_score:
+        return "valhalla"
+    if olympus_score > valhalla_score and olympus_score:
+        return "olympus"
+    return None
+
+
+def _routing_context(turns, max_turns=6, max_chars=3500):
+    """Make a compact, labelled context block for routing and retrieval."""
+    context = []
+    for turn in list(turns or [])[-max_turns:]:
+        role = "Salena" if turn.get("role") == "assistant" else "User"
+        content = str(turn.get("content") or "").strip()
+        if content:
+            context.append("{}: {}".format(role, content))
+    result = "\n".join(context)
+    return result[-max_chars:]
+
+
+def _is_short_follow_up(query):
+    """Whether a message depends on the immediately preceding exchange."""
+    words = re.findall(r"[A-Za-z0-9_/.-]+", str(query or ""))
+    return bool(words) and len(words) <= 6 and "?" not in str(query or "")
 
 
 def _should_search_codebase(query, intent):
@@ -1981,10 +2042,20 @@ def autonomous_decision(query, turns, product_hint=None, force_reply=False):
             "draft_answer": _social_reply(query), "claim_evidence": [],
             "unsupported_claims": [],
         }
-    classifier_input = query
-    if product_hint in {"valhalla", "olympus"}:
-        classifier_input = "Source-channel product context: {}\nCurrent message: {}".format(
-            product_hint, query,
+    # Redis/recent-message context already reaches the drafter, but the route
+    # and retrieval choices must see it too.  Otherwise a reply such as
+    # "DLMM copy trading" loses the NFT/subscription question it answers.
+    conversation_context = _routing_context(turns)
+    contextual_product_hint = product_hint or _context_product_hint(query, turns)
+    classifier_input = "Current message: {}".format(query)
+    if conversation_context:
+        classifier_input = (
+            "Conversation context (use it to resolve short follow-ups; do not "
+            "treat it as a product fact):\n{}\n\n{}"
+        ).format(conversation_context, classifier_input)
+    if contextual_product_hint in {"valhalla", "olympus"}:
+        classifier_input = "Product context: {}\n{}".format(
+            contextual_product_hint, classifier_input,
         )
     route = ask_json(
         ROUTER_SYSTEM,
@@ -1996,14 +2067,25 @@ def autonomous_decision(query, turns, product_hint=None, force_reply=False):
     action = route.get("action")
     product = route.get("product")
     intent = route.get("intent")
-    hinted_intent = _intent_hint(query)
+    # Prefer the parent question's intent only for short, answer-the-clarifier
+    # replies.  A full new question in the same ticket must stand on its own.
+    intent_query = query
+    if conversation_context and _is_short_follow_up(query):
+        intent_query = "{}\n{}".format(query, conversation_context)
+    hinted_intent = _intent_hint(intent_query)
     if hinted_intent:
         intent = hinted_intent
-    if product_hint in {"valhalla", "olympus"}:
-        product = product_hint
+    if contextual_product_hint in {"valhalla", "olympus"}:
+        product = contextual_product_hint
 
-    searches = [(query, product, intent)]
-    searches.extend(_plan_searches(query, product, intent))
+    # Preserve the current question first, then append only its compact
+    # conversational anchor.  This makes prior terms such as "NFT" available
+    # to fact retrieval without replacing the user's actual follow-up.
+    research_query = query
+    if conversation_context:
+        research_query = "{}\nConversation context:\n{}".format(query, conversation_context)
+    searches = [(research_query, product, intent)]
+    searches.extend(_plan_searches(research_query, product, intent))
 
     facts_by_id = OrderedDict()
     codebase_by_id = OrderedDict()
@@ -2277,7 +2359,7 @@ def autonomous_decision(query, turns, product_hint=None, force_reply=False):
     )
     draft_action = draft.get("action")
     known_answer = (
-        _known_safe_answer(query, product, facts)
+        _known_safe_answer(research_query, product, facts)
         if APPROVED_FACTS_ENABLED and action == "answer" else ""
     )
     if known_answer:
