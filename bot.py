@@ -130,6 +130,15 @@ SWEEP_MAX_REPLIES = _env_int("SWEEP_MAX_REPLIES", 5)
 # that this process is no longer listening. The watchdog below asks launchd to
 # start a fresh process (and therefore a fresh WebSocket) when that happens.
 GATEWAY_STALE_SECONDS = max(90.0, _env_float("GATEWAY_STALE_SECONDS", 180))
+# Give the reconnect loop time to build replacement sockets before the
+# watchdog tears down the whole process. A short grace caused normal Discord
+# reconnects to race the watchdog and exhaust local network sockets.
+GATEWAY_RECOVERY_GRACE_SECONDS = max(
+    60.0, _env_float("GATEWAY_RECOVERY_GRACE_SECONDS", 120)
+)
+GATEWAY_RECONNECT_MAX_SECONDS = max(
+    15.0, _env_float("GATEWAY_RECONNECT_MAX_SECONDS", 60)
+)
 GATEWAY_RESTART_GRACE_SECONDS = max(
     5.0, _env_float("GATEWAY_RESTART_GRACE_SECONDS", 20)
 )
@@ -800,6 +809,15 @@ def _mark_gateway_signal(source):
     log.debug("Gateway liveness signal: %s", source)
 
 
+def _mark_gateway_connected():
+    """Record a successful fresh connection and clear stale failure state."""
+    global _gateway_last_signal_monotonic, _gateway_last_error_monotonic, _gateway_last_error
+    with _gateway_health_lock:
+        _gateway_last_signal_monotonic = time.monotonic()
+        _gateway_last_error_monotonic = 0.0
+        _gateway_last_error = ""
+
+
 def _mark_gateway_error(error):
     """Keep the most recent transport failure for the watchdog's diagnosis."""
     global _gateway_last_error_monotonic, _gateway_last_error
@@ -824,7 +842,7 @@ def _install_gateway_health_hooks(gateway):
 
     def on_open(self, ws):
         if _bot is not None and self is _bot.gateway:
-            _mark_gateway_signal("websocket opened")
+            _mark_gateway_connected()
         return original_open(self, ws)
 
     def on_error(self, ws, error):
@@ -857,7 +875,8 @@ def _install_gateway_health_hooks(gateway):
             # native behavior is safer than constructing a malformed URL.
             return original_run(self, auto_reconnect=True)
 
-        while True:
+        consecutive_failures = 0
+        while not _stop.is_set():
             try:
                 self._zlib = zlib.decompressobj()
                 self.ws.run_forever(
@@ -879,22 +898,37 @@ def _install_gateway_health_hooks(gateway):
             except Exception as exc:
                 if isinstance(exc, ConnectionResumableException):
                     self._last_err = None
-                    wait_seconds = random.randrange(1, 6)
+                    consecutive_failures += 1
+                    wait_seconds = min(
+                        15.0,
+                        2 ** min(consecutive_failures, 3) + random.uniform(0, 1),
+                    )
                     log.warning(
                         "Discord gateway dropped; resuming with a fresh socket in %ss",
-                        wait_seconds,
+                        round(wait_seconds, 1),
                     )
                 elif isinstance(exc, ConnectionManuallyClosedException):
                     log.info("Discord gateway closed on request")
                     break
                 else:
                     self.resetSession()
-                    wait_seconds = 10
+                    consecutive_failures += 1
+                    wait_seconds = min(
+                        GATEWAY_RECONNECT_MAX_SECONDS,
+                        5 * (2 ** min(consecutive_failures - 1, 4)) + random.uniform(0, 1),
+                    )
                     log.warning(
                         "Discord gateway dropped (%s); reconnecting with a fresh socket in %ss",
-                        exc, wait_seconds,
+                        exc, round(wait_seconds, 1),
                     )
 
+                try:
+                    # Explicitly release the previous transport before opening
+                    # another one. Without this, repeated reconnects can leave
+                    # enough half-closed sockets behind to cause Errno 49.
+                    self.ws.close()
+                except Exception:
+                    pass
                 try:
                     self.ws = self._get_ws_app(websocket_url)
                 except Exception as socket_exc:
@@ -902,7 +936,8 @@ def _install_gateway_health_hooks(gateway):
                     # cannot even be constructed.
                     _mark_gateway_error(socket_exc)
                     log.warning("Could not create replacement Discord socket: %s", socket_exc)
-                time.sleep(wait_seconds)
+                if _stop.wait(wait_seconds):
+                    break
 
     # WebSocketApp invokes these through lambdas that dereference gateway at
     # call time, so replacing the class methods after Client() construction is
@@ -966,13 +1001,15 @@ def _gateway_watchdog():
         silent_for = now - reference
         disconnected = not bool(getattr(gateway, "connected", False))
 
-        # A closed gateway with a recorded failure may be restarted earlier,
-        # but leave a full heartbeat interval for a normal reconnection first.
-        # discum sometimes leaves connected=True after websocket-client emits
-        # "socket is already closed", so absence of any signal *after* the
-        # error is also treated as a failed reconnect.
+        # Do not race a normal reconnect. The listener now retries with fresh
+        # sockets and exponential backoff, so the watchdog waits through that
+        # bounded recovery window before escalating to a process restart.
         error_age = now - last_error if last_error else None
-        if disconnected and error_age is not None and error_age >= 30:
+        if (
+            disconnected
+            and error_age is not None
+            and error_age >= GATEWAY_RECOVERY_GRACE_SECONDS
+        ):
             _request_gateway_restart(
                 "socket stayed disconnected for {:.0f}s after {}".format(
                     error_age, error_text or "an unknown error"
@@ -981,7 +1018,7 @@ def _gateway_watchdog():
             return
         if (
             error_age is not None
-            and error_age >= 30
+            and error_age >= GATEWAY_RECOVERY_GRACE_SECONDS
             and last_signal <= last_error
         ):
             _request_gateway_restart(
