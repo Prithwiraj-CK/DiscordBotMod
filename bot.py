@@ -58,6 +58,10 @@ from knowledge import (
     retrieve_history, retrieve_notes,
 )
 from llm import ask_json
+from support_pipeline import (
+    analysis_log, calculate_support_values, detect_product_feature,
+    extract_question, format_calculation_response, rank_evidence,
+)
 
 load_dotenv()
 
@@ -521,10 +525,17 @@ VALIDATION_SCHEMA = {
     "additionalProperties": False,
     "properties": {
         "supported": {"type": "boolean"},
+        "answers_question": {"type": "boolean"},
+        "wrong_product_or_feature": {"type": "boolean"},
+        "incorrect_arithmetic": {"type": "boolean"},
+        "unnecessary_clarification": {"type": "boolean"},
         "unsupported_claims": {"type": "array", "items": {"type": "string"}},
         "forbidden_claims": {"type": "array", "items": {"type": "string"}},
     },
-    "required": ["supported", "unsupported_claims", "forbidden_claims"],
+    "required": [
+        "supported", "answers_question", "wrong_product_or_feature",
+        "incorrect_arithmetic", "unnecessary_clarification", "unsupported_claims", "forbidden_claims",
+    ],
 }
 
 REASONING_SCHEMA = {
@@ -682,6 +693,11 @@ status, balances, safety claims, and profit claims as unsupported. Also flag
 requests for secrets and claims that contradict the evidence. A short social
 reply with no factual claim is supported. This audit is autonomous and must not
 ask staff for approval.
+
+Also verify that the response answers the actual question, names the correct
+product and feature when they are known, respects any supplied deterministic
+calculation, and does not ask for values that were already provided. Set the
+corresponding boolean to true when one of those checks fails.
 
 APPROVED EVIDENCE AND READ-ONLY CODEBASE EXCERPTS
 """
@@ -1733,10 +1749,13 @@ def _should_search_codebase(query, intent):
 
 def _repository_products(search_product, search_query):
     """Choose only fixed repository roots; a model never chooses filesystem paths."""
-    if REPOSITORY_SEARCH_BOTH:
-        return ("valhalla", "olympus")
     if search_product in {"valhalla", "olympus"}:
         return (search_product,)
+    # Exact product/feature detection is more reliable than generic language
+    # such as "market". Search both roots only while the product is genuinely
+    # unresolved, rather than diluting a confident product's evidence.
+    if REPOSITORY_SEARCH_BOTH:
+        return ("valhalla", "olympus")
     lowered = (search_query or "").lower()
     if "valhalla" in lowered:
         return ("valhalla",)
@@ -2046,7 +2065,21 @@ def autonomous_decision(query, turns, product_hint=None, force_reply=False):
     # and retrieval choices must see it too.  Otherwise a reply such as
     # "DLMM copy trading" loses the NFT/subscription question it answers.
     conversation_context = _routing_context(turns)
-    contextual_product_hint = product_hint or _context_product_hint(query, turns)
+    preliminary_detection = detect_product_feature(query, prior_product=product_hint)
+    extracted_question = extract_question(query, preliminary_detection)
+    calculation = calculate_support_values(extracted_question)
+    deterministic_product = preliminary_detection.get("product")
+    contextual_product_hint = (
+        product_hint
+        or (deterministic_product if deterministic_product in {"valhalla", "olympus"} else None)
+        or _context_product_hint(query, turns)
+    )
+    log.info(
+        "Support analysis product=%s feature=%s labels=%s terms=%s values=%s calculation=%s",
+        preliminary_detection.get("product"), preliminary_detection.get("feature"),
+        preliminary_detection.get("exact_labels"), preliminary_detection.get("matched_terms"),
+        extracted_question.get("values"), calculation.get("handler") if calculation else "none",
+    )
     classifier_input = "Current message: {}".format(query)
     if conversation_context:
         classifier_input = (
@@ -2075,6 +2108,8 @@ def autonomous_decision(query, turns, product_hint=None, force_reply=False):
     hinted_intent = _intent_hint(intent_query)
     if hinted_intent:
         intent = hinted_intent
+    if extracted_question.get("intent") == "configure_settings":
+        intent = "settings"
     if contextual_product_hint in {"valhalla", "olympus"}:
         product = contextual_product_hint
 
@@ -2084,6 +2119,10 @@ def autonomous_decision(query, turns, product_hint=None, force_reply=False):
     research_query = query
     if conversation_context:
         research_query = "{}\nConversation context:\n{}".format(query, conversation_context)
+    if preliminary_detection.get("exact_labels"):
+        research_query = "Exact interface labels: {}\n{}".format(
+            ", ".join(preliminary_detection["exact_labels"]), research_query,
+        )
     searches = [(research_query, product, intent)]
     searches.extend(_plan_searches(research_query, product, intent))
 
@@ -2151,9 +2190,9 @@ def autonomous_decision(query, turns, product_hint=None, force_reply=False):
         seen_reads = set()
         for research_round in range(1, 9):
             current_codebase = list(codebase_by_id.values())
-            preliminary = (
-                list(facts_by_id.values())[:20]
-                + current_codebase[:48]
+            preliminary = rank_evidence(
+                list(facts_by_id.values()) + current_codebase,
+                research_query, preliminary_detection, limit=8,
             )
             review = _review_evidence(
                 query, product, intent, preliminary, current_codebase,
@@ -2220,21 +2259,21 @@ def autonomous_decision(query, turns, product_hint=None, force_reply=False):
             if not changed:
                 break
 
-    facts = list(facts_by_id.values())[:20]
-    codebase_items = list(codebase_by_id.values())
-    # Nearby context is more useful than another isolated matching line.
-    context_items = [
-        item for item in codebase_items
-        if item.get("source_type") in {"codebase_section", "codebase_context"}
+    # Retrieval is deliberately broad; the model is not given every matching
+    # line. Exact UI labels and source authority rerank it down to a compact,
+    # auditable evidence packet.
+    all_evidence = list(facts_by_id.values()) + list(codebase_by_id.values())
+    facts = rank_evidence(all_evidence, research_query, preliminary_detection, limit=8)
+    codebase_excerpts = [
+        item for item in facts if str(item.get("source_type", "")).startswith("codebase")
     ]
-    line_items = [
-        item for item in codebase_items
-        if item.get("source_type") not in {"codebase_section", "codebase_context"}
-    ]
-    codebase_excerpts = (context_items + line_items)[:24]
-    facts.extend(codebase_excerpts)
-    note_excerpts = list(notes_by_key.values())[:12]
-    historical_excerpts = list(history_by_key.values())[:12]
+    note_excerpts = list(notes_by_key.values())[:4]
+    historical_excerpts = list(history_by_key.values())[:4]
+    log.info(
+        "Support retrieval scope=%s top_evidence=%s",
+        product if product in {"olympus", "valhalla"} else "both",
+        [(item.get("source"), item.get("_rank")) for item in facts],
+    )
     fact_ids = {str(fact.get("id", "")) for fact in facts}
     research_synthesis = None
     if (
@@ -2255,6 +2294,11 @@ def autonomous_decision(query, turns, product_hint=None, force_reply=False):
             action = "answer"
         elif not research_synthesis["answerable"] and research_synthesis["decision"] in {"clarify", "escalate"}:
             action = research_synthesis["decision"]
+    # Deterministic arithmetic is answerable only after repository retrieval
+    # selected supporting setting definitions. It can therefore upgrade a
+    # cautious initial clarification, but never bypasses evidence entirely.
+    if calculation and extracted_question.get("answerable") and codebase_excerpts:
+        action = "answer"
     # Deterministic safety gates override a model choice for high-risk text.
     if (_MUST_ESCALATE_RE.search(query) or _SECURITY_RE.search(query)) and not _SAFE_SETUP_SECURITY_RE.search(query):
         return {
@@ -2324,11 +2368,15 @@ def autonomous_decision(query, turns, product_hint=None, force_reply=False):
 
     draft_prompt = (
         DRAFTER_SYSTEM
-        + "\nROUTER DECISION: action={} intent={} product={}\n"
-        "Follow this action unless the evidence makes it impossible; do not escalate "
-        "a general question that the evidence answers.\n"
+        + "\nINITIAL ROUTE HYPOTHESIS: action={} intent={} product={}\n"
+        "The initial route is not final. Use the evidence, structured extraction, and "
+        "calculation to decide whether the question is answerable. Do not clarify values "
+        "already supplied by the user.\n"
         .format(action, intent, product)
         + _evidence_text(facts)
+    )
+    draft_prompt += "\n\n# STRUCTURED QUESTION\n{}".format(
+        json.dumps(analysis_log(extracted_question, calculation), sort_keys=True),
     )
     if note_excerpts:
         draft_prompt += "\n\n" + notes_prompt(note_excerpts)
@@ -2398,11 +2446,16 @@ def autonomous_decision(query, turns, product_hint=None, force_reply=False):
             "claim": known_answer[:400],
             "evidence_ids": list(draft["evidence_ids"]),
         }]
-    elif action == "clarify" and draft_action != "clarify":
-        draft_action = "clarify"
-        draft["draft_answer"] = _fallback_clarification(query)
-        draft["evidence_ids"] = sorted(fact_ids)
-        draft["claim_evidence"] = []
+    elif calculation and action == "answer":
+        calculation_answer = format_calculation_response(calculation)
+        if calculation_answer:
+            draft_action = "answer"
+            draft["draft_answer"] = calculation_answer
+            draft["evidence_ids"] = sorted(fact_ids)
+            draft["claim_evidence"] = [{
+                "claim": calculation_answer[:400],
+                "evidence_ids": list(draft["evidence_ids"]),
+            }]
     if force_reply and draft_action not in {"answer", "clarify"}:
         draft_action = "answer"
         draft["draft_answer"] = (
@@ -2482,7 +2535,11 @@ def autonomous_decision(query, turns, product_hint=None, force_reply=False):
     if _UNSAFE_PERFORMANCE_RE.search(answer) and intent == "performance":
         answer = _safe_performance_answer(facts)
 
-    validation = {"supported": True, "unsupported_claims": [], "forbidden_claims": []}
+    validation = {
+        "supported": True, "answers_question": True, "wrong_product_or_feature": False,
+        "incorrect_arithmetic": False, "unnecessary_clarification": False,
+        "unsupported_claims": [], "forbidden_claims": [],
+    }
     if facts and answer:
         claim_map = "\n".join(
             "- {} -> {}".format(item["claim"], ", ".join(item["evidence_ids"]) or "none")
@@ -2491,7 +2548,12 @@ def autonomous_decision(query, turns, product_hint=None, force_reply=False):
         validation = ask_json(
             VALIDATOR_SYSTEM + _evidence_text(facts)
             + "\n\nCLAIM-TO-EVIDENCE MAP:\n" + claim_map,
-            [{"role": "user", "content": "DRAFT RESPONSE:\n" + answer}],
+            [{"role": "user", "content": (
+                "QUESTION: {}\nPRODUCT: {}\nFEATURE: {}\nCALCULATION: {}\n\nDRAFT RESPONSE:\n{}"
+            ).format(
+                query, product, preliminary_detection.get("feature"),
+                json.dumps(calculation, sort_keys=True) if calculation else "none", answer,
+            )}],
             VALIDATION_SCHEMA,
             name="support_validation",
             temperature=0.0,
@@ -2504,15 +2566,62 @@ def autonomous_decision(query, turns, product_hint=None, force_reply=False):
         claim for claim in validation.get("forbidden_claims", [])
         if not _claim_is_in_evidence(claim, facts)
     )
+    quality_failures = []
+    if validation.get("answers_question") is not True:
+        quality_failures.append("draft did not answer the question")
+    if validation.get("wrong_product_or_feature") is True:
+        quality_failures.append("draft used the wrong product or feature")
+    if validation.get("incorrect_arithmetic") is True:
+        quality_failures.append("draft arithmetic was incorrect")
+    if validation.get("unnecessary_clarification") is True:
+        quality_failures.append("draft requested information already supplied")
     if validation.get("supported") is not True and not unsupported:
         log.warning("Validator returned false without a claim; accepting evidence-backed draft")
-    if unsupported:
-        log.warning("Rejected unsupported draft: %s", unsupported)
+    if unsupported or quality_failures:
+        validation_errors = unsupported + quality_failures
+        # One bounded correction attempt prevents a known, grounded answer
+        # from being discarded merely because the first draft was incomplete.
+        # It receives the validator's concrete objections, not free-form
+        # instruction-following from the user.
+        try:
+            corrected = ask_json(
+                DRAFTER_SYSTEM + _evidence_text(facts)
+                + "\n\n# VALIDATION CORRECTION\nFix these issues without adding facts: {}\n"
+                "Return a direct answer when the evidence and supplied calculation are sufficient."
+                .format("; ".join(validation_errors)),
+                turns,
+                DRAFT_SCHEMA,
+                name="support_validation_correction",
+                temperature=0.0,
+            )
+        except Exception as exc:
+            log.warning("Validation correction unavailable: %s", exc)
+            corrected = None
+        if corrected:
+            corrected_action = corrected.get("action")
+            corrected_answer = str(corrected.get("draft_answer") or "").strip()
+            corrected_ids = _normalise_draft_evidence(corrected)
+            if (
+                corrected_action in {"answer", "clarify"}
+                and corrected_answer
+                and corrected_ids
+                and corrected_ids.issubset(fact_ids)
+            ):
+                log.info("Accepted one-pass validation correction for product=%s feature=%s", product, preliminary_detection.get("feature"))
+                return {
+                    "action": corrected_action, "product": product, "intent": intent,
+                    "risk": route.get("risk"), "confidence": route.get("confidence", 0),
+                    "evidence_ids": sorted(corrected_ids),
+                    "missing_information": corrected.get("missing_information", []),
+                    "draft_answer": corrected_answer, "unsupported_claims": [],
+                }
+        log.warning("Rejected draft after validation: %s", validation_errors)
         return {
             "action": "escalate", "product": product, "intent": intent,
             "risk": "critical", "confidence": route.get("confidence", 0),
             "evidence_ids": sorted(fact_ids), "missing_information": [],
-            "draft_answer": ESCALATE, "unsupported_claims": unsupported or ["validator rejected draft"],
+            "draft_answer": ESCALATE,
+            "unsupported_claims": validation_errors or ["validator rejected draft"],
         }
     return {
         "action": draft_action, "product": product, "intent": intent,

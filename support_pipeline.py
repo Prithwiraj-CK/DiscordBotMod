@@ -145,9 +145,9 @@ def extract_question(text: str, detection: dict[str, Any]) -> dict[str, Any]:
         values["intended_ratio_percent"] = _display_number(intended_ratio)
 
     screenshot_fields = {
-        "visible_ratio_field": r"ratio\s*%\s*(?:currently\s*)?(?:shows?|is|=|:)\s*" + _NUMBER_RE,
-        "visible_max_trade_size_usd": r"max\s+trade\s+size\s*(?:currently\s*)?(?:shows?|is|=|:)\s*" + _NUMBER_RE,
-        "visible_max_market_size_usd": r"max\s+market\s+size\s*(?:currently\s*)?(?:shows?|is|=|:)\s*" + _NUMBER_RE,
+        "visible_ratio_field": r"ratio\s*%\s*(?:(?:currently\s*)?(?:shows?|is|=|:)\s*)?" + _NUMBER_RE,
+        "visible_max_trade_size_usd": r"max\s+trade\s+size\s*(?:(?:currently\s*)?(?:shows?|is|=|:)\s*)?" + _NUMBER_RE,
+        "visible_max_market_size_usd": r"max\s+market\s+size\s*(?:(?:currently\s*)?(?:shows?|is|=|:)\s*)?" + _NUMBER_RE,
     }
     for field, pattern in screenshot_fields.items():
         value = _first_number(pattern, source)
@@ -218,6 +218,24 @@ def calculate_support_values(record: dict[str, Any]) -> dict[str, Any] | None:
     return None
 
 
+def format_calculation_response(calculation: dict[str, Any]) -> str:
+    """Render a verified calculator result without asking the LLM to do maths."""
+    if calculation.get("handler") != "copy_trade_sizing":
+        return ""
+    response = (
+        "Set **Max Trade Size** to **${}** so each copied opening is capped at that amount. "
+        "Set **Max Market Size** to **${}** for the total exposure in that market. "
+        "Set **Max Trades / Market** to **{}** for the initial entry plus the allowed additional entries."
+    ).format(
+        calculation["max_trade_size_usd"],
+        calculation["max_market_size_usd"],
+        calculation["max_trades_per_market"],
+    )
+    if calculation.get("warnings"):
+        response += " " + " ".join(calculation["warnings"])
+    return response
+
+
 def rank_evidence(items: list[dict[str, Any]], query: str, detection: dict[str, Any], limit: int = 8) -> list[dict[str, Any]]:
     """Rerank evidence by authority and exact UI terminology before drafting."""
     labels = [_norm(label) for label in detection.get("exact_labels", [])]
@@ -238,6 +256,8 @@ def rank_evidence(items: list[dict[str, Any]], query: str, detection: dict[str, 
         text = "{} {} {}".format(item.get("source", ""), item.get("fact", ""), item.get("answer_guidance", ""))
         normalized = _norm(text)
         score = source_weights.get(str(item.get("source_type", "")), 20)
+        if item.get("approved") is True:
+            score = max(score, source_weights["approved_fact"])
         score += sum(4 for word in query_words if word in normalized)
         score += sum(80 for label in labels if label in normalized)
         path = str(item.get("path", "")).casefold()
