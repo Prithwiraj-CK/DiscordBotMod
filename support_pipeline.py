@@ -180,6 +180,58 @@ def calculate(expression: str) -> float:
     return float(result)
 
 
+def percentage_of(amount: float, percent: float) -> float:
+    """Return a percentage of an amount with finite-number validation."""
+    return calculate("({}) * ({}) / 100".format(float(amount), float(percent)))
+
+
+def calculate_pnl(entry_price: float, current_price: float, quantity: float, fees_paid: float = 0) -> dict[str, float]:
+    """Calculate gross/net PnL and percentage return for a position."""
+    entry_value = calculate("({}) * ({})".format(float(entry_price), float(quantity)))
+    current_value = calculate("({}) * ({})".format(float(current_price), float(quantity)))
+    gross = calculate("({}) - ({})".format(current_value, entry_value))
+    net = calculate("({}) - ({})".format(gross, float(fees_paid)))
+    percent = calculate("({}) / ({}) * 100".format(gross, entry_value)) if entry_value else 0.0
+    return {"gross_pnl": gross, "net_pnl": net, "return_percent": percent}
+
+
+def calculate_fees_and_net(gross_amount: float, fee_percent: float) -> dict[str, float]:
+    """Calculate a percentage fee and the amount remaining after it."""
+    fee = percentage_of(gross_amount, fee_percent)
+    return {"fee": fee, "net_amount": calculate("({}) - ({})".format(float(gross_amount), fee))}
+
+
+def calculate_apr(principal: float, return_amount: float, days: float) -> float:
+    """Annualize a completed return; a zero/negative duration is invalid."""
+    if float(principal) <= 0 or float(days) <= 0:
+        raise ValueError("principal and days must be positive")
+    return calculate("({}) / ({}) * 365 / ({}) * 100".format(float(return_amount), float(principal), float(days)))
+
+
+def calculate_stop_take_prices(entry_price: float, stop_loss_percent: float, take_profit_percent: float) -> dict[str, float]:
+    """Return long-position stop-loss and take-profit price levels."""
+    return {
+        "stop_loss_price": calculate("({}) * (1 - ({}) / 100)".format(float(entry_price), float(stop_loss_percent))),
+        "take_profit_price": calculate("({}) * (1 + ({}) / 100)".format(float(entry_price), float(take_profit_percent))),
+    }
+
+
+def calculate_position_exposure(entries: list[float]) -> float:
+    """Sum independently supplied entry sizes without interpreting account data."""
+    return sum(calculate(str(float(entry))) for entry in entries)
+
+
+def days_until(iso_timestamp: str, now: datetime | None = None) -> float:
+    """Return whole/partial days to a timezone-aware ISO market expiration."""
+    target = datetime.fromisoformat(str(iso_timestamp).replace("Z", "+00:00"))
+    if target.tzinfo is None:
+        raise ValueError("timestamp must include a timezone")
+    reference = now or datetime.now(timezone.utc)
+    if reference.tzinfo is None:
+        raise ValueError("now must include a timezone")
+    return (target - reference).total_seconds() / 86400
+
+
 def calculate_copy_trade_sizing(record: dict[str, Any]) -> dict[str, Any] | None:
     """Calculate reusable per-entry and cumulative copy-trading limits."""
     values = record.get("values", {})

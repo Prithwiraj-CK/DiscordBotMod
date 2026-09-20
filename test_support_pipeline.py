@@ -1,7 +1,9 @@
 import unittest
+from datetime import datetime, timezone
 
 from support_pipeline import (
-    calculate, calculate_support_values, detect_product_feature,
+    calculate, calculate_apr, calculate_fees_and_net, calculate_pnl,
+    calculate_position_exposure, calculate_stop_take_prices, calculate_support_values, days_until, detect_product_feature,
     extract_question, format_calculation_response, rank_evidence,
 )
 
@@ -91,6 +93,17 @@ class SupportPipelineTests(unittest.TestCase):
         self.assertEqual(7, calculate("1 + 2 * 3"))
         with self.assertRaises(ValueError):
             calculate("__import__('os').system('false')")
+
+    def test_reusable_financial_calculators(self):
+        self.assertEqual(8, calculate_pnl(10, 14, 2)["gross_pnl"])
+        self.assertEqual(3, calculate_fees_and_net(100, 3)["fee"])
+        self.assertEqual(97, calculate_fees_and_net(100, 3)["net_amount"])
+        self.assertEqual(365, calculate_apr(100, 10, 10))
+        levels = calculate_stop_take_prices(100, 10, 25)
+        self.assertEqual(90, levels["stop_loss_price"])
+        self.assertEqual(125, levels["take_profit_price"])
+        self.assertEqual(6, calculate_position_exposure([1, 2, 3]))
+        self.assertEqual(1, days_until("2026-01-02T00:00:00Z", datetime(2026, 1, 1, tzinfo=timezone.utc)))
 
 
 if __name__ == "__main__":
