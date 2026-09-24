@@ -115,8 +115,11 @@ Salena uses `gpt-6-luna` through the Responses API with configurable reasoning
 (`OPENAI_REASONING_EFFORT=medium` by default). Set
 `DAILY_USAGE_WEBHOOK_URL` in the ignored `.env` to receive one report every
 24 hours with estimated API cost, calls, input/cache-write/output/reasoning
-tokens, and model counts. The local `.runtime/openai_usage.jsonl` ledger stores
-only those counts and cost metadata—never Discord text, prompts, or replies.
+tokens, and model counts. With `USAGE_REPORT_LIVE_UPDATES=true` (the default),
+that same report message is edited after each completed support response with
+the latest rolling totals; it does not post a new message per question. The
+local `.runtime/openai_usage.jsonl` ledger stores only those counts and cost
+metadata—never Discord text, prompts, or replies.
 
 ### 6. Validate the knowledge corpus
 

@@ -19,9 +19,12 @@ import requests
 log = logging.getLogger("support-bot.usage")
 
 _ROOT = Path(__file__).resolve().parent
-_LOCK = threading.Lock()
+_LOCK = threading.RLock()
+_UPDATE_LOCK = threading.Lock()
 _STOP = threading.Event()
 _THREAD = None
+_UPDATE_THREAD = None
+_UPDATE_VERSION = 0
 _SECONDS_PER_DAY = 24 * 60 * 60
 
 # USD per million tokens. These are saved with each event so an old report
@@ -111,6 +114,7 @@ def record_usage(model, usage, now=None):
         path.parent.mkdir(parents=True, exist_ok=True)
         with _LOCK, path.open("a", encoding="utf-8") as handle:
             handle.write(json.dumps(event, separators=(",", ":")) + "\n")
+        request_usage_report_update()
     except OSError:
         log.exception("Could not write local OpenAI usage ledger")
 
@@ -212,8 +216,21 @@ def _format_report(since, until, totals):
     )
 
 
+def _webhook_wait_url(url):
+    """Ask Discord to return the created message ID without exposing the URL."""
+    separator = "&" if "?" in url else "?"
+    return url + separator + "wait=true"
+
+
+def _report_payload(since, until):
+    return {
+        "content": _format_report(since, until, summarize_usage(since, until)),
+        "allowed_mentions": {"parse": []},
+    }
+
+
 def send_due_report(now=None):
-    """Post at most one 24-hour usage report; returns True only on success."""
+    """Create the report message at the start of each 24-hour window."""
     url = os.getenv("DAILY_USAGE_WEBHOOK_URL", "").strip()
     if not url:
         return False
@@ -223,16 +240,85 @@ def send_due_report(now=None):
         previous = float(state.get("last_report_at", current - _SECONDS_PER_DAY))
         if current - previous < _SECONDS_PER_DAY:
             return False
-        totals = summarize_usage(previous, current)
-        payload = {"content": _format_report(previous, current, totals), "allowed_mentions": {"parse": []}}
+        payload = _report_payload(previous, current)
         try:
-            response = requests.post(url, json=payload, timeout=10)
+            response = requests.post(_webhook_wait_url(url), json=payload, timeout=10)
             response.raise_for_status()
+            body = response.json()
+            message_id = str(body.get("id") or "")
         except requests.exceptions.RequestException as exc:
             log.warning("Could not send daily usage report: %s", exc)
             return False
-        _save_state({"last_report_at": current})
+        except (ValueError, AttributeError, TypeError):
+            # The post succeeded but Discord did not return an editable message
+            # object. Keep reporting daily and create a fresh editable report on
+            # the next usage event instead of losing accounting altogether.
+            message_id = ""
+        _save_state({"last_report_at": current, "message_id": message_id})
         return True
+
+
+def update_current_report(now=None):
+    """Edit the active report in place with the latest rolling 24-hour totals."""
+    url = os.getenv("DAILY_USAGE_WEBHOOK_URL", "").strip()
+    if not url:
+        return False
+    current = float(time.time() if now is None else now)
+    with _LOCK:
+        state = _load_state()
+        previous = float(state.get("last_report_at", current - _SECONDS_PER_DAY))
+        message_id = str(state.get("message_id") or "")
+        if current - previous >= _SECONDS_PER_DAY or not message_id:
+            # Legacy reports were posted before we tracked a Discord message
+            # ID. Start one new editable report instead of posting every time.
+            state["last_report_at"] = current - _SECONDS_PER_DAY
+            _save_state(state)
+            return send_due_report(current)
+        try:
+            response = requests.patch(
+                "{}/messages/{}".format(url, message_id),
+                json=_report_payload(previous, current),
+                timeout=10,
+            )
+            response.raise_for_status()
+            return True
+        except requests.exceptions.RequestException as exc:
+            log.warning("Could not update live usage report: %s", exc)
+            return False
+
+
+def request_usage_report_update():
+    """Refresh after each model response without blocking the support reply."""
+    global _UPDATE_THREAD, _UPDATE_VERSION
+    if not os.getenv("DAILY_USAGE_WEBHOOK_URL", "").strip():
+        return
+    if os.getenv("USAGE_REPORT_LIVE_UPDATES", "true").strip().lower() not in {"1", "true", "yes", "on"}:
+        return
+    with _UPDATE_LOCK:
+        _UPDATE_VERSION += 1
+        if _UPDATE_THREAD and _UPDATE_THREAD.is_alive():
+            return
+        _UPDATE_THREAD = threading.Thread(
+            target=_live_update_loop, name="usage-report-update", daemon=True,
+        )
+        _UPDATE_THREAD.start()
+
+
+def _live_update_loop():
+    """Coalesce a burst of model calls, then ensure the latest count is shown."""
+    global _UPDATE_VERSION
+    while not _STOP.is_set():
+        # A short coalescing window avoids one webhook edit per internal router,
+        # planner, drafter, and validator call while still updating after every
+        # user message's response has finished.
+        if _STOP.wait(0.35):
+            return
+        with _UPDATE_LOCK:
+            before = _UPDATE_VERSION
+        update_current_report()
+        with _UPDATE_LOCK:
+            if _UPDATE_VERSION == before:
+                return
 
 
 def start_daily_usage_reporter():
@@ -250,7 +336,8 @@ def start_daily_usage_reporter():
 
 def _report_loop():
     send_due_report()
-    # Polling makes a failed webhook retry on the next five-minute interval,
-    # without claiming a successful report in the persistent state.
+    # Polling makes a failed webhook edit retry on the next five-minute
+    # interval, without claiming a successful update in the persistent state.
     while not _STOP.wait(300):
-        send_due_report()
+        if not send_due_report():
+            update_current_report()

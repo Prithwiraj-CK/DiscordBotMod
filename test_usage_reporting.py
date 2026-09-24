@@ -34,6 +34,7 @@ class UsageReportingTests(unittest.TestCase):
             "USAGE_LEDGER_PATH": str(self.ledger),
             "USAGE_REPORT_STATE_PATH": str(self.state),
             "DAILY_USAGE_WEBHOOK_URL": "https://example.test/webhook",
+            "USAGE_REPORT_LIVE_UPDATES": "false",
         }, clear=False)
         self.environ.start()
 
@@ -54,16 +55,21 @@ class UsageReportingTests(unittest.TestCase):
         self.assertNotIn("prompt", event)
         self.assertNotIn("output", event)
 
+    @patch("usage_reporting.requests.patch")
     @patch("usage_reporting.requests.post")
-    def test_sends_one_report_per_day(self, post):
+    def test_creates_then_updates_one_report_message(self, post, patch_request):
         post.return_value.raise_for_status.return_value = None
+        post.return_value.json.return_value = {"id": "usage-message"}
+        patch_request.return_value.raise_for_status.return_value = None
         usage_reporting.record_usage("gpt-6-luna", _Usage(), now=101)
         self.assertTrue(usage_reporting.send_due_report(now=100 + 86400))
+        self.assertTrue(usage_reporting.update_current_report(now=100 + 86401))
         self.assertFalse(usage_reporting.send_due_report(now=100 + 86401))
         content = post.call_args.kwargs["json"]["content"]
         self.assertIn("Estimated cost: **$0.0004**", content)
         self.assertIn("Read: 1,000 input tokens", content)
         self.assertIn("Wrote: 600 output tokens (400 reasoning)", content)
+        self.assertIn("/messages/usage-message", patch_request.call_args.args[0])
 
 
 if __name__ == "__main__":
