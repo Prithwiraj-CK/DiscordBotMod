@@ -1764,6 +1764,34 @@ def _context_product_hint(query, turns):
     return None
 
 
+def _historical_product_hint(query):
+    """Use a matching staff Q&A only to route an otherwise ambiguous question.
+
+    History is never final answer evidence: old replies can be incomplete or
+    stale.  It can safely tell the researcher which fixed repository to search
+    when a past staff question has the same wording and explicitly names the
+    product.  The eventual answer still has to come from current repository
+    sections or approved facts.
+    """
+    try:
+        matches = retrieve_history(query, product=None, limit=4)
+    except Exception as exc:
+        log.warning("Historical product routing unavailable: %s", exc)
+        return None
+    for item in matches:
+        if not item.get("is_staff"):
+            continue
+        context = "\n".join(
+            str(item.get(field) or "")
+            for field in ("question_context", "content")
+        )
+        hint = _context_product_hint(context, [])
+        if hint in {"valhalla", "olympus"}:
+            log.info("Historical staff context selected repository product=%s", hint)
+            return hint
+    return None
+
+
 def _routing_context(turns, max_turns=6, max_chars=3500):
     """Make a compact, labelled context block for routing and retrieval."""
     context = []
@@ -1832,6 +1860,76 @@ def _should_search_codebase(query, intent):
         query or "",
         re.IGNORECASE,
     ))
+
+
+_VALHALLA_CAPACITY_QUESTION_RE = re.compile(
+    r"(?:\b(?:copy|follow|leader|position)\b.{0,120}"
+    r"\b(?:balance|funds?|afford|insufficient|lower|smaller|skip)\b|"
+    r"\b(?:balance|funds?|afford|insufficient)\b.{0,120}"
+    r"\b(?:copy|follow|leader|position|skip)\b)",
+    re.IGNORECASE,
+)
+
+
+def _collect_valhalla_capacity_evidence(query, product, evidence_by_id):
+    """Read the bounded current workflow that governs copy-trade capacity.
+
+    This is not model-selected filesystem access: all three locations are
+    fixed, safe relative paths in the configured Valhalla root.  They pair the
+    balance condition with the caller's retry and final skip behavior, which a
+    generic semantic search often separates.
+    """
+    if product != "valhalla" or not _VALHALLA_CAPACITY_QUESTION_RE.search(query or ""):
+        return
+    ranges = (
+        ("src/scripts/copy-trade/copy-utils/notification-utils.ts", 165, 275),
+        ("src/scripts/copy-trade/transaction-handlers/open-position-handler.ts", 421, 450),
+        ("src/scripts/copy-trade/transaction-handlers/open-position-handler.ts", 565, 615),
+    )
+    for path, start_line, end_line in ranges:
+        # These fixed, bounded ranges cover one complete conditional or retry
+        # method.  ``read_codebase_section`` can anchor to a nested callback
+        # in this TypeScript file, so use the known workflow range instead.
+        excerpt = read_codebase_file("valhalla", path, start_line, end_line)
+        if excerpt:
+            evidence_by_id[str(excerpt.get("id", ""))] = excerpt
+
+
+def _valhalla_capacity_answer(query, product, codebase_items):
+    """Return a precise answer only when both code paths are present.
+
+    The first section establishes the amount required; the second and third
+    establish the single retry and eventual skip. Requiring all three avoids
+    turning a lone error message into an unsupported execution claim.
+    """
+    if product != "valhalla" or not _VALHALLA_CAPACITY_QUESTION_RE.search(query or ""):
+        return None
+    balance_ids = []
+    skip_ids = []
+    retry_ids = []
+    for item in codebase_items:
+        if not str(item.get("source_type", "")).startswith("codebase"):
+            continue
+        text = str(item.get("fact") or "")
+        evidence_id = str(item.get("id") or "")
+        if "verifyUserWalletConditions" in text or "minimumRequiredBalance" in text:
+            balance_ids.append(evidence_id)
+        if "restrictionResult.shouldSkip" in text and "Skipping position" in text:
+            skip_ids.append(evidence_id)
+        if "retryOpenPositionJob" in text and "delay: 30000" in text:
+            retry_ids.append(evidence_id)
+    if not balance_ids or not skip_ids or not retry_ids:
+        return None
+    evidence_ids = [balance_ids[0], retry_ids[0], skip_ids[0]]
+    return {
+        "evidence_ids": evidence_ids,
+        "answer": (
+            "Valhalla does not automatically reduce the copy to fit a low balance. "
+            "It checks whether your effective balance covers the calculated copy amount plus "
+            "the applicable fees and position rent. If that check fails, it retries the open "
+            "once after 30 seconds; if the condition still fails, it skips that position."
+        ),
+    }
 
 
 def _repository_products(search_product, search_query):
@@ -2161,6 +2259,7 @@ def autonomous_decision(query, turns, product_hint=None, force_reply=False):
         product_hint
         or (deterministic_product if deterministic_product in {"valhalla", "olympus"} else None)
         or _context_product_hint(resolved_query, turns)
+        or _historical_product_hint(resolved_query)
     )
     log.info(
         "Support analysis product=%s feature=%s labels=%s terms=%s values=%s calculation=%s",
@@ -2261,6 +2360,15 @@ def autonomous_decision(query, turns, product_hint=None, force_reply=False):
     for search_query, search_product, search_intent in searches:
         collect_search(search_query, search_product, search_intent)
 
+    # A copy-capacity question has a small but important execution workflow:
+    # validate balance, retry once, then skip. Read those complete current
+    # sections together before an LLM reviewer can be distracted by a generic
+    # "balance" hit.
+    if CODEBASE_SEARCH_ENABLED:
+        _collect_valhalla_capacity_evidence(
+            resolved_query, product, codebase_by_id,
+        )
+
     # Give the evidence a thorough review loop. This lets her notice that the
     # first hit answered a neighboring topic, then search focused phrases and
     # read relevant portions of the already matched repository. The review is
@@ -2357,6 +2465,20 @@ def autonomous_decision(query, turns, product_hint=None, force_reply=False):
     # auditable evidence packet.
     all_evidence = list(facts_by_id.values()) + list(codebase_by_id.values())
     facts = rank_evidence(all_evidence, research_query, preliminary_detection, limit=8)
+    capacity_answer = _valhalla_capacity_answer(
+        resolved_query, product, list(codebase_by_id.values()),
+    )
+    if capacity_answer:
+        # Preserve the complete code ranges even when generic ranking
+        # preferred a neighboring hit.  The answer below may use only these
+        # IDs, so it remains auditable and cannot inherit unrelated evidence.
+        selected_ids = set(capacity_answer["evidence_ids"])
+        existing_ids = {str(item.get("id", "")) for item in facts}
+        facts.extend(
+            item for item in codebase_by_id.values()
+            if str(item.get("id", "")) in selected_ids
+            and str(item.get("id", "")) not in existing_ids
+        )
     codebase_excerpts = [
         item for item in facts if str(item.get("source_type", "")).startswith("codebase")
     ]
@@ -2368,6 +2490,25 @@ def autonomous_decision(query, turns, product_hint=None, force_reply=False):
         [(item.get("source"), item.get("_rank")) for item in facts],
     )
     fact_ids = {str(fact.get("id", "")) for fact in facts}
+    if capacity_answer and set(capacity_answer["evidence_ids"]).issubset(fact_ids):
+        # This general execution rule is fully determined by current
+        # repository sections. Returning it directly prevents citation format,
+        # routing conservatism, or a generic drafter from replacing a verified
+        # answer with an unnecessary handoff. It does not apply to a user's
+        # live transaction, balance, or dispute, which remain protected by the
+        # escalation gates below.
+        answer = capacity_answer["answer"]
+        return {
+            "action": "answer", "product": product, "intent": intent,
+            "risk": "low", "confidence": 1.0,
+            "evidence_ids": list(capacity_answer["evidence_ids"]),
+            "missing_information": [], "draft_answer": answer,
+            "claim_evidence": [{
+                "claim": answer[:400],
+                "evidence_ids": list(capacity_answer["evidence_ids"]),
+            }],
+            "unsupported_claims": [],
+        }
     research_synthesis = None
     if (
         facts

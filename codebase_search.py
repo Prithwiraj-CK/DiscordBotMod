@@ -155,6 +155,30 @@ def _single_token_queries(query: str) -> list[str]:
     return list(dict.fromkeys(tokens))[:5]
 
 
+def _workflow_queries(query: str) -> list[str]:
+    """Return precise anchors for a copy-trade capacity workflow.
+
+    Natural-language questions such as "does it skip or use a lower amount?"
+    rarely contain the implementation names that decide the behavior.  These
+    fixed anchors are only added for that narrow class of question; they do
+    not turn a general search into an arbitrary repository sweep.
+    """
+    lowered = str(query or "").lower()
+    about_copying = bool(re.search(r"\b(?:copy|follow|leader|position)\b", lowered))
+    about_capacity = bool(re.search(
+        r"\b(?:balance|funds?|afford|insufficient|lower|smaller|skip)\b", lowered,
+    ))
+    if not (about_copying and about_capacity):
+        return []
+    return [
+        "verifyUserWalletConditions",
+        "Insufficient Effective Balance for Copy Trading",
+        "wallet condition failure",
+        "retryOpenPositionJob",
+        "Skipping position",
+    ]
+
+
 def _redact(line: str) -> str | None:
     if _SENSITIVE_LINE_RE.search(line):
         return None
@@ -484,6 +508,10 @@ def search_codebase(query: str, product: str | None, limit: int = 32) -> list[di
                 if len(results) >= min(64, max(1, limit)):
                     break
 
+    # Search execution anchors before the user's natural-language phrasing.
+    # This keeps a generic "balance" match from crowding out the exact
+    # balance-check/retry/skip workflow that answers the question.
+    run_patterns(_workflow_queries(query))
     run_patterns(_queries(query))
     # A single generic word is too noisy. Use it only if no phrase search found
     # anything, so a precise match such as "jup score" cannot be crowded out.
