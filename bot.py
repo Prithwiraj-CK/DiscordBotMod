@@ -1782,6 +1782,42 @@ def _is_short_follow_up(query):
     return bool(words) and len(words) <= 6 and "?" not in str(query or "")
 
 
+_CONTEXT_CORRECTION_RE = re.compile(
+    r"\b(?:i\s+(?:was\s+)?(?:asking|mean|meant)|that(?:'s|\s+is)\s+for|"
+    r"the\s+(?:valhalla|olympus)\s+(?:one|setting))\b",
+    re.IGNORECASE,
+)
+
+
+def _resolve_follow_up_question(query, turns):
+    """Attach the parent question when a short message corrects its product.
+
+    ``I was asking about Valhalla ratio`` is not a new unknown question: it is
+    a correction of the user's immediately preceding Ratio % question. Keep
+    the correction explicit and only borrow a previous *user* question, never
+    Salena's prior answer, which may be the very answer being corrected.
+    """
+    current = str(query or "").strip()
+    if not _is_short_follow_up(current) or not _CONTEXT_CORRECTION_RE.search(current):
+        return current
+    explicit_product = _context_product_hint(current, [])
+    if explicit_product not in {"valhalla", "olympus"}:
+        return current
+    for turn in reversed(list(turns or [])):
+        if turn.get("role") != "user":
+            continue
+        parent = str(turn.get("content") or "").strip()
+        if not parent or parent == current:
+            continue
+        if _asks_something(parent) or re.search(
+            r"\b(?:ratio|copy|wallet|trade|dlmm|setting)\b", parent, re.IGNORECASE,
+        ):
+            return "{}\n\nUser clarification (this corrects the product): {}".format(
+                parent, current,
+            )
+    return current
+
+
 def _should_search_codebase(query, intent):
     """Research every non-social support question when repository mode is on."""
     if intent in {"social", "addressed_to_staff", "security"}:
@@ -2116,14 +2152,15 @@ def autonomous_decision(query, turns, product_hint=None, force_reply=False):
     # and retrieval choices must see it too.  Otherwise a reply such as
     # "DLMM copy trading" loses the NFT/subscription question it answers.
     conversation_context = _routing_context(turns)
-    preliminary_detection = detect_product_feature(query, prior_product=product_hint)
-    extracted_question = extract_question(query, preliminary_detection)
+    resolved_query = _resolve_follow_up_question(query, turns)
+    preliminary_detection = detect_product_feature(resolved_query, prior_product=product_hint)
+    extracted_question = extract_question(resolved_query, preliminary_detection)
     calculation = calculate_support_values(extracted_question)
     deterministic_product = preliminary_detection.get("product")
     contextual_product_hint = (
         product_hint
         or (deterministic_product if deterministic_product in {"valhalla", "olympus"} else None)
-        or _context_product_hint(query, turns)
+        or _context_product_hint(resolved_query, turns)
     )
     log.info(
         "Support analysis product=%s feature=%s labels=%s terms=%s values=%s calculation=%s",
@@ -2132,6 +2169,11 @@ def autonomous_decision(query, turns, product_hint=None, force_reply=False):
         extracted_question.get("values"), calculation.get("handler") if calculation else "none",
     )
     classifier_input = "Current message: {}".format(query)
+    if resolved_query != query:
+        classifier_input += (
+            "\nResolved support question: {}\n"
+            "The user's product clarification corrects any earlier product assumption."
+        ).format(resolved_query)
     if conversation_context:
         classifier_input = (
             "Conversation context (use it to resolve short follow-ups; do not "
@@ -2153,7 +2195,7 @@ def autonomous_decision(query, turns, product_hint=None, force_reply=False):
     intent = route.get("intent")
     # Prefer the parent question's intent only for short, answer-the-clarifier
     # replies.  A full new question in the same ticket must stand on its own.
-    intent_query = query
+    intent_query = resolved_query
     if conversation_context and _is_short_follow_up(query):
         intent_query = "{}\n{}".format(query, conversation_context)
     hinted_intent = _intent_hint(intent_query)
@@ -2167,7 +2209,7 @@ def autonomous_decision(query, turns, product_hint=None, force_reply=False):
     # Preserve the current question first, then append only its compact
     # conversational anchor.  This makes prior terms such as "NFT" available
     # to fact retrieval without replacing the user's actual follow-up.
-    research_query = query
+    research_query = resolved_query
     if conversation_context:
         research_query = "{}\nConversation context:\n{}".format(query, conversation_context)
     if preliminary_detection.get("exact_labels"):
@@ -2246,7 +2288,7 @@ def autonomous_decision(query, turns, product_hint=None, force_reply=False):
                 research_query, preliminary_detection, limit=8,
             )
             review = _review_evidence(
-                query, product, intent, preliminary, current_codebase,
+            resolved_query, product, intent, preliminary, current_codebase,
                 list(notes_by_key.values())[:12],
             )
             changed = False
@@ -2334,7 +2376,7 @@ def autonomous_decision(query, turns, product_hint=None, force_reply=False):
         and not _DISCREPANCY_RE.search(query)
     ):
         research_synthesis = _synthesize_research(
-            query, product, intent, facts, notes=note_excerpts,
+            resolved_query, product, intent, facts, notes=note_excerpts,
         )
     hinted_action = _action_hint(query, product, intent)
     if hinted_action:
@@ -2349,6 +2391,15 @@ def autonomous_decision(query, turns, product_hint=None, force_reply=False):
     # selected supporting setting definitions. It can therefore upgrade a
     # cautious initial clarification, but never bypasses evidence entirely.
     if calculation and extracted_question.get("answerable") and codebase_excerpts:
+        action = "answer"
+    # Deterministic, approved answers are stronger than a cautious router on
+    # a product-correction follow-up. Do this before drafting, otherwise the
+    # known-answer override below is skipped whenever the router says clarify.
+    known_answer_hint = (
+        _known_safe_answer(research_query, product, facts)
+        if APPROVED_FACTS_ENABLED else ""
+    )
+    if known_answer_hint:
         action = "answer"
     # Deterministic safety gates override a model choice for high-risk text.
     if (_MUST_ESCALATE_RE.search(query) or _SECURITY_RE.search(query)) and not _SAFE_SETUP_SECURITY_RE.search(query):
@@ -2458,8 +2509,7 @@ def autonomous_decision(query, turns, product_hint=None, force_reply=False):
     )
     draft_action = draft.get("action")
     known_answer = (
-        _known_safe_answer(research_query, product, facts)
-        if APPROVED_FACTS_ENABLED and action == "answer" else ""
+        known_answer_hint if action == "answer" else ""
     )
     if known_answer:
         draft_action = "answer"

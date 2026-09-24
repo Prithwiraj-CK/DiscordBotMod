@@ -1,7 +1,10 @@
 import unittest
 from unittest.mock import patch
 
-from bot import _discord_messages, _discord_post_message, _transport_mode
+from bot import (
+    _discord_messages, _discord_post_message, _resolve_follow_up_question,
+    _transport_mode,
+)
 
 
 class TransportModeTests(unittest.TestCase):
@@ -32,6 +35,17 @@ class TransportModeTests(unittest.TestCase):
         )
         self.assertEqual("hello", post.call_args.kwargs["json"]["content"])
         self.assertEqual(20, post.call_args.kwargs["timeout"])
+
+    def test_product_correction_reuses_the_parent_user_question(self):
+        resolved = _resolve_follow_up_question(
+            "i was asking about valhalla ratio",
+            [
+                {"role": "user", "content": "Billi: @Salena What does Ratio % do when copying a wallet?"},
+                {"role": "assistant", "content": "Ratio % is an Olympus setting."},
+            ],
+        )
+        self.assertIn("What does Ratio % do when copying a wallet?", resolved)
+        self.assertIn("i was asking about valhalla ratio", resolved)
 
 
 if __name__ == "__main__":
