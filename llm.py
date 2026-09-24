@@ -77,6 +77,26 @@ def _max_attempts():
         return 3
 
 
+def _json_max_output_tokens():
+    """Bounded output budget for strict routing, research, and draft JSON.
+
+    A strict JSON response can contain several evidence IDs, an answer, and
+    validation notes. 500 tokens was occasionally too small for that shape,
+    leaving a syntactically incomplete object that the next stage could not
+    parse. Keep the value configurable, but never allow an accidental setting
+    to make a single support turn unbounded.
+    """
+    try:
+        return min(2_000, max(300, int(os.getenv("LLM_JSON_MAX_OUTPUT_TOKENS", "1200"))))
+    except ValueError:
+        return 1200
+
+
+def _retry_delay(attempt):
+    """Exponential, jittered retry delay shared by text and JSON calls."""
+    return min(2 ** (attempt - 1), 8) + random.uniform(0, 0.5)
+
+
 def _model_name():
     """The active model is read per call so a restarted service picks up .env."""
     return os.getenv("OPENAI_MODEL", "gpt-6-luna").strip() or "gpt-6-luna"
@@ -197,7 +217,7 @@ def ask_llm(system_prompt, messages):
                 break
             # Exponential backoff, capped, with jitter so that a burst of
             # questions during an outage does not retry in lockstep.
-            delay = min(2 ** (attempt - 1), 8) + random.uniform(0, 0.5)
+            delay = _retry_delay(attempt)
             log.warning(
                 "Model call failed (attempt %s/%s): %s. Retrying in %.1fs",
                 attempt, attempts, type(exc).__name__, delay,
@@ -238,7 +258,7 @@ def ask_json(system_prompt, messages, schema, name="structured_response", temper
                 model=model,
                 instructions=system_prompt,
                 input=_response_input(messages),
-                max_output_tokens=500,
+                max_output_tokens=_json_max_output_tokens(),
                 reasoning={"effort": _reasoning_effort()},
                 text={"format": text_format},
                 store=False,
@@ -246,26 +266,38 @@ def ask_json(system_prompt, messages, schema, name="structured_response", temper
             _record_response_usage(response, model)
             content = (response.output_text or "").strip()
             if not content:
-                raise LLMUnavailable("OpenAI returned an empty structured response")
+                raise ValueError("OpenAI returned an empty structured response")
             try:
                 value = json.loads(content)
             except ValueError as exc:
-                raise LLMUnavailable("OpenAI returned invalid structured JSON") from exc
+                raise ValueError("OpenAI returned invalid structured JSON") from exc
             if not isinstance(value, dict):
-                raise LLMUnavailable("OpenAI structured response was not an object")
+                raise ValueError("OpenAI structured response was not an object")
             return value
 
         except openai.AuthenticationError as exc:
             raise LLMUnavailable("OpenAI rejected the API key: {}".format(exc)) from exc
         except openai.BadRequestError as exc:
             raise LLMUnavailable("OpenAI rejected the structured request: {}".format(exc)) from exc
-        except LLMUnavailable:
-            raise
+        except ValueError as exc:
+            # A reasoning model can occasionally exhaust its output budget
+            # while emitting a strict object, or return an empty result after
+            # internal reasoning. This is transient for a support turn: retry
+            # the exact structured request before failing the whole question.
+            last_error = exc
+            if attempt == attempts:
+                break
+            delay = _retry_delay(attempt)
+            log.warning(
+                "Structured model response was incomplete (attempt %s/%s): %s. Retrying in %.1fs",
+                attempt, attempts, exc, delay,
+            )
+            time.sleep(delay)
         except _RETRYABLE as exc:
             last_error = exc
             if attempt == attempts:
                 break
-            delay = min(2 ** (attempt - 1), 8) + random.uniform(0, 0.5)
+            delay = _retry_delay(attempt)
             log.warning(
                 "Structured model call failed (attempt %s/%s): %s. Retrying in %.1fs",
                 attempt, attempts, type(exc).__name__, delay,
@@ -273,7 +305,7 @@ def ask_json(system_prompt, messages, schema, name="structured_response", temper
             time.sleep(delay)
 
     raise LLMUnavailable(
-        "Structured model unreachable after {} attempts: {}: {}".format(
+        "Structured model unavailable after {} attempts: {}: {}".format(
             attempts, type(last_error).__name__, last_error
         )
     ) from last_error
