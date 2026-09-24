@@ -3,7 +3,10 @@
 import unittest
 from unittest.mock import patch
 
-from bot import _historical_product_hint, _known_safe_answer, _valhalla_capacity_answer
+from bot import (
+    _historical_product_hint, _known_safe_answer, _repository_products,
+    _staff_history_evidence, _valhalla_capacity_answer,
+)
 from codebase_search import _workflow_queries
 from knowledge import retrieve_facts
 
@@ -74,6 +77,40 @@ class RepositoryReasoningTests(unittest.TestCase):
         answer = _known_safe_answer(question, "olympus", facts)
         self.assertIn("resolved market", answer)
         self.assertIn("USDC", answer)
+
+    def test_matching_staff_answer_is_general_evidence_not_raw_history(self):
+        evidence = _staff_history_evidence(
+            "What does redeemed mean in Olympus?",
+            "olympus",
+            [{
+                "id": "1535011277150359612",
+                "is_staff": True,
+                "channel_name": "general",
+                "question_context": "For Olympus. What does redeemed mean?",
+                "content": "Redeeming means claiming your winnings from a resolved market.",
+            }],
+        )
+        self.assertEqual("staff_history.1535011277150359612", evidence[0]["id"])
+        self.assertEqual("staff_history", evidence[0]["source_type"])
+
+    def test_staff_history_is_not_evidence_for_a_stuck_redemption(self):
+        evidence = _staff_history_evidence(
+            "My Olympus redemption is stuck and missing.",
+            "olympus",
+            [{
+                "id": "1535011277150359612",
+                "is_staff": True,
+                "channel_name": "general",
+                "question_context": "For Olympus. What does redeemed mean?",
+                "content": "Redeeming means claiming your winnings from a resolved market.",
+            }],
+        )
+        self.assertEqual([], evidence)
+
+    @patch("bot.REPOSITORY_SEARCH_BOTH", True)
+    def test_repository_research_checks_both_fixed_roots(self):
+        self.assertEqual(("olympus", "valhalla"), _repository_products("olympus", "redeemed"))
+        self.assertEqual(("valhalla", "olympus"), _repository_products("valhalla", "copy ratio"))
 
 
 if __name__ == "__main__":

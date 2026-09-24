@@ -299,6 +299,9 @@ def rank_evidence(items: list[dict[str, Any]], query: str, detection: dict[str, 
         "codebase_structure": 35,
         "codebase_reference": 25,
         "approved_fact": 58,
+        # A matched staff Q&A is stronger than unverified chat context, but
+        # remains below current code and explicitly approved product facts.
+        "staff_history": 48,
         "history": 10,
         "note": 18,
     }
