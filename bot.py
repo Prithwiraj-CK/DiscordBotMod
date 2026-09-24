@@ -167,9 +167,12 @@ GATEWAY_RESTART_GRACE_SECONDS = max(
 # reply to every "gm" from half an hour ago.
 SWEEP_BACKFILL = os.getenv("SWEEP_BACKFILL_ON_START", "").strip().lower() in ("1", "true", "yes")
 
-# Small grace so a quick crash-and-restart does not lose the message that
-# arrived while we were down.
-_BACKFILL_GRACE = timedelta(seconds=60)
+# A short recovery window so a stalled poller or quick restart does not lose a
+# freshly tagged question. The normal answer filter still requires a direct
+# tag/reply, so this never turns a restart into a replay of ordinary chat.
+_BACKFILL_GRACE = timedelta(
+    seconds=max(60, _env_float("REST_BACKFILL_GRACE_SECONDS", 300))
+)
 
 # How many times we'll try to answer one message before writing it off.
 ANSWER_ATTEMPTS = _env_int("ANSWER_ATTEMPTS", 3)
@@ -1175,6 +1178,41 @@ def _record_failure(message_id, channel_id, reason):
 
 class DiscordCallFailed(RuntimeError):
     pass
+
+
+def _discord_headers():
+    """Authorization headers for the bounded Discord REST transport."""
+    return {"Authorization": TOKEN}
+
+
+def _discord_messages(channel_id, limit, before=None):
+    """Read one channel page through requests, never discum's unbounded client.
+
+    The allowlist remains enforced by the callers. A timeout is essential here:
+    a hung read must skip one poll pass rather than freeze the sole polling
+    thread and make a healthy-looking service silently stop listening.
+    """
+    params = {"limit": limit}
+    if before:
+        params["before"] = str(before)
+    return requests.get(
+        "https://discord.com/api/v9/channels/{}/messages".format(channel_id),
+        headers=_discord_headers(),
+        params=params,
+        timeout=20,
+    )
+
+
+def _discord_post_message(channel_id, content, **kwargs):
+    """Post through the same bounded REST transport used for polling."""
+    payload = {"content": content}
+    payload.update(kwargs)
+    return requests.post(
+        "https://discord.com/api/v9/channels/{}/messages".format(channel_id),
+        headers=_discord_headers(),
+        json=payload,
+        timeout=20,
+    )
 
 
 def _call(description, func, *args, **kwargs):
@@ -2660,7 +2698,7 @@ def _recent_context(channel_id, before_id):
         return []
     response = _call(
         "history for channel {}".format(channel_id),
-        _bot.getMessages, channel_id, num=CONTEXT_MESSAGES, beforeDate=before_id,
+        _discord_messages, channel_id, CONTEXT_MESSAGES, before=before_id,
     )
     try:
         history = response.json()
@@ -2811,7 +2849,7 @@ def _answer(message):
             }
         _call(
             "post answer for message {}".format(message_id),
-            _bot.sendMessage, target, body, **kwargs
+            _discord_post_message, target, body, **kwargs
         )
         if scope:
             _conversation_memory.append(
@@ -3087,7 +3125,7 @@ def _sweep_once():
         try:
             response = _call(
                 "sweep history for channel {}".format(channel_id),
-                _bot.getMessages, channel_id, num=100,
+                _discord_messages, channel_id, 100,
             )
             history = response.json()
         except DiscordCallFailed as exc:
