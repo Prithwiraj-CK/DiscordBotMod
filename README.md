@@ -65,29 +65,25 @@ The memory path does not widen the Discord read allowlist or the output-channel
 guard. For local use, start Redis and set
 `REDIS_URL=redis://127.0.0.1:6379/0` in `.env`.
 
-### Gateway recovery
+### Discord transport
 
-The Discord listener has a watchdog because the legacy `discum` client can
-loop on a WebSocket after that socket has closed. A healthy idle gateway still
-receives heartbeat acknowledgements, so if there is no gateway traffic for
-`GATEWAY_STALE_SECONDS` (180 seconds by default), the process exits and its
-launchd supervisor starts a new process with a new WebSocket. A closed socket
-or any recorded transport error without later gateway traffic is restarted
-after `GATEWAY_RECOVERY_GRACE_SECONDS` (120 seconds by default). Before that
-the listener closes the old socket and retries with a fresh one using bounded
-exponential backoff, which avoids local socket exhaustion. `GATEWAY_RESTART_GRACE_SECONDS`
-(20 seconds by default) is the maximum time allowed for the clean shutdown
-before the supervisor restart is forced. The five-minute REST sweep remains a
-separate backup for messages that arrived during a reconnect.
+Salena uses REST polling every 15 seconds by default (`DISCORD_TRANSPORT=rest`)
+instead of discum's unstable user-account WebSocket. It reads only the existing
+allowed channels and preserves the output-channel guard; the trade-off is up to
+one poll interval of reply delay. This removes the recurring WebSocket callback
+`error 15`, reconnect loops, and watchdog restarts from normal operation.
+
+`DISCORD_TRANSPORT=gateway` remains as a compatibility escape hatch. In that
+mode the gateway watchdog and five-minute REST backup sweep are enabled, but
+the legacy transport remains unreliable.
 
 ### Production transport
 
 The current listener still authenticates with a Discord user token through the
-unmaintained `discum` library. The recovery layer reduces dropped-message risk,
-but cannot make that unsupported transport production-grade. The durable fix is
-an official Discord application and bot token, then a migration to a maintained
-bot gateway client. Do not put a bot token in source control; keep it only in
-the ignored `.env` file.
+unmaintained `discum` library. REST polling avoids its failing WebSocket, but
+the durable production fix remains an official Discord application and bot
+token with a maintained gateway client. Do not put a bot token in source
+control; keep it only in the ignored `.env` file.
 
 ### 3. Add knowledge
 

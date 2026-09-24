@@ -100,6 +100,16 @@ def _env_float(name, default):
         return default
 
 
+def _transport_mode(raw):
+    """Choose a safe Discord transport without allowing a typo to revive discum's gateway."""
+    value = str(raw or "").strip().lower()
+    if value in {"gateway", "rest"}:
+        return value
+    if value:
+        log.warning("Unknown DISCORD_TRANSPORT=%r; using rest", value)
+    return "rest"
+
+
 def _parse_channel_ids(raw):
     """One malformed id must not take the whole allowlist with it.
 
@@ -122,6 +132,8 @@ def _parse_channel_ids(raw):
 TOKEN = os.getenv("DISCORD_USER_TOKEN", "").strip()
 STAFF_ROLE_ID = os.getenv("STAFF_ROLE_ID", "").strip()
 CONTEXT_MESSAGES = _env_int("CONTEXT_MESSAGES", 8)
+DISCORD_TRANSPORT = _transport_mode(os.getenv("DISCORD_TRANSPORT", "rest"))
+REST_POLL_SECONDS = max(10.0, _env_float("REST_POLL_SECONDS", 15))
 
 # Catch-up sweep: how often to look for messages we missed, how far back to
 # look, and how many we're willing to answer in one pass.
@@ -3127,22 +3139,22 @@ def _sweep_once():
 
 
 def _sweep_forever():
-    """Answer anything we missed while offline or between gateway hiccups.
+    """Read allowed channels through Discord REST and answer new direct requests.
 
-    The gateway is the primary path - this is a safety net, so on a healthy bot
-    it should find nothing almost every time.
+    REST polling is the live transport because discum's user-account WebSocket
+    is unmaintained and repeatedly closes with callback error 15. A bounded
+    poll is slower than a gateway event, but unlike that gateway it remains
+    usable after a socket reset and needs no reconnect/watchdog cycle.
 
     Every failure in here is contained. A dead sweep is a silent bot, and it
     stays silent until someone notices, so one bad channel or one bad message
     must never end the loop.
     """
-    interval = SWEEP_MINUTES * 60
+    interval = REST_POLL_SECONDS if DISCORD_TRANSPORT == "rest" else SWEEP_MINUTES * 60
 
-    # First pass runs almost immediately rather than after a full interval.
-    # A restart takes a few seconds, and anything asked during those seconds
-    # reaches neither the old gateway nor the new one. The backfill grace
-    # covers it, but waiting five minutes to use that means a question sits
-    # unanswered for five minutes purely because a deploy happened.
+    # First pass runs almost immediately rather than after a full interval so a
+    # restart cannot add a full poll interval to the response delay. The small
+    # backfill grace covers a message arriving exactly while the service starts.
     first = True
     while True:
         if _stop.wait(5 if first else interval):
@@ -3151,8 +3163,8 @@ def _sweep_forever():
         try:
             _sweep_once()
         except Exception as exc:
-            log.exception("Catch-up sweep pass failed, continuing")
-            alert("Catch-up sweep pass failed: {}".format(exc), key="sweep-crash")
+            log.exception("Discord REST poll pass failed, continuing")
+            alert("Discord REST poll pass failed: {}".format(exc), key="rest-poll-crash")
 
 
 # ---------------------------------------------------------------------------
@@ -3261,47 +3273,51 @@ def main():
     _executor = ThreadPoolExecutor(max_workers=WORKER_THREADS, thread_name_prefix="answer")
     _memory_executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="memory")
 
-    # Discord's payloads have outgrown discum's unmaintained session-cache
-    # parser. This listener only needs raw message events, not cached guild data.
-
-    @_bot.gateway.command
-    def _on_event(resp):
-        # Runs on the gateway thread. Return fast and never raise: blocking
-        # here stalls the heartbeat, and raising kills the connection.
-        try:
-            _mark_gateway_signal("gateway event")
-            if not resp.event.message:
-                return
-            message = resp.parsed.auto()
-            if _memory_executor is not None:
-                _memory_executor.submit(_remember_incoming, message)
-            if not _should_answer(message):
-                return
-
-            message_id = str(message.get("id", ""))
-            if not _reserve(message_id):
-                return
-            _executor.submit(_answer_safely, message)
-        except Exception:
-            log.exception("Error dispatching a gateway event")
-
     sweeper = threading.Thread(target=_sweep_forever, name="sweep", daemon=True)
     sweeper.start()
-    watchdog = threading.Thread(target=_gateway_watchdog, name="gateway-watchdog", daemon=True)
-    watchdog.start()
-    log.info(
-        "Catch-up sweep running every %s min (%s)",
-        SWEEP_MINUTES,
-        "backfilling history from before startup" if SWEEP_BACKFILL
-        else "new messages only, no backfill on start",
-    )
-    log.info(
-        "Gateway watchdog will restart a stale connection after %.0fs",
-        GATEWAY_STALE_SECONDS,
-    )
+    if DISCORD_TRANSPORT == "gateway":
+        # Kept only as an explicit compatibility escape hatch. The default REST
+        # mode below never opens discum's unstable WebSocket.
+        @_bot.gateway.command
+        def _on_event(resp):
+            try:
+                _mark_gateway_signal("gateway event")
+                if not resp.event.message:
+                    return
+                message = resp.parsed.auto()
+                if _memory_executor is not None:
+                    _memory_executor.submit(_remember_incoming, message)
+                if not _should_answer(message):
+                    return
+                message_id = str(message.get("id", ""))
+                if _reserve(message_id):
+                    _executor.submit(_answer_safely, message)
+            except Exception:
+                log.exception("Error dispatching a gateway event")
+
+        watchdog = threading.Thread(target=_gateway_watchdog, name="gateway-watchdog", daemon=True)
+        watchdog.start()
+        log.info(
+            "Gateway enabled; REST backup sweep runs every %s min (%s)",
+            SWEEP_MINUTES,
+            "backfilling history from before startup" if SWEEP_BACKFILL
+            else "new messages only, no backfill on start",
+        )
+        log.info("Gateway watchdog will restart a stale connection after %.0fs", GATEWAY_STALE_SECONDS)
+    else:
+        log.info(
+            "Discord REST polling enabled every %.0fs (%s); gateway disabled",
+            REST_POLL_SECONDS,
+            "backfilling history from before startup" if SWEEP_BACKFILL
+            else "new messages only, no backfill on start",
+        )
 
     try:
-        _bot.gateway.run(auto_reconnect=True)
+        if DISCORD_TRANSPORT == "gateway":
+            _bot.gateway.run(auto_reconnect=True)
+        else:
+            while not _stop.wait(1):
+                pass
     except KeyboardInterrupt:
         log.info("Interrupted, shutting down")
     finally:
@@ -3310,12 +3326,14 @@ def main():
         if _memory_executor is not None:
             _memory_executor.shutdown(wait=False)
 
-    # gateway.run() returning means the connection is gone for good. Exit
-    # non-zero so a supervisor actually restarts us instead of reading it as a
-    # clean shutdown.
-    log.error("Gateway stopped")
-    alert("Gateway stopped, the bot is no longer listening.", key="gateway-stopped")
-    return 3
+    if DISCORD_TRANSPORT == "gateway":
+        # gateway.run() returning means the connection is gone for good. Exit
+        # non-zero so a supervisor actually restarts us instead of reading it
+        # as a clean shutdown.
+        log.error("Gateway stopped")
+        alert("Gateway stopped, the bot is no longer listening.", key="gateway-stopped")
+        return 3
+    return 0
 
 
 if __name__ == "__main__":
