@@ -653,7 +653,10 @@ ROUTER_SYSTEM = """Classify the current Discord message for an autonomous produc
 Choose exactly one action:
 - answer: the approved knowledge clearly answers a general product question
 - clarify: one important detail is missing and a short question can obtain it
-- escalate: account-specific money, wallet, security, trade discrepancy, or unsupported behavior
+- escalate: a user's specific account, wallet, balance, deposit, withdrawal,
+  missing funds, security issue, trade discrepancy, or unsupported behavior.
+  A general question about wallet architecture, setup, or documented behavior
+  is not account-specific and should be answered when evidence supports it.
 - ignore: a sign-off, thanks to another person, or a question explicitly addressed to staff
 
 Use product=generic for social or unrelated messages. Never choose answer for a
@@ -2813,6 +2816,46 @@ def autonomous_decision(query, turns, product_hint=None, force_reply=False):
         # A later drafting model must not replace a direct, vetted staff
         # answer with a generic clarification or handoff.
         return _staff_fallback_decision(product, intent, staff_fallback)
+    repository_answer_is_grounded = bool(
+        research_synthesis
+        and research_synthesis.get("decision") == "answer"
+        and research_synthesis.get("answerable") is True
+        and any(
+            str(item.get("source_type", ""))
+            in {"codebase_section", "codebase_file", "codebase_context"}
+            for item in codebase_excerpts
+        )
+    )
+    if draft_action in {"clarify", "escalate"} and repository_answer_is_grounded:
+        # A general repository question has already passed a separate evidence
+        # synthesis and has complete current code/documentation in context.
+        # Let a conservative first drafter retry once with an explicit answer
+        # requirement rather than silently replacing researched evidence with
+        # a handoff. Account, security, and discrepancy paths return before
+        # this point and therefore cannot use this override.
+        try:
+            grounded_retry = ask_json(
+                DRAFTER_SYSTEM + _evidence_text(facts)
+                + "\n\n# GROUNDED REPOSITORY RETRY\n"
+                "The completed repository evidence above directly answers this "
+                "general product question. Return action=answer and give the "
+                "shortest accurate answer supported by those evidence IDs. Do "
+                "not escalate or clarify unless the evidence genuinely omits a "
+                "fact required by the question.",
+                turns,
+                DRAFT_SCHEMA,
+                name="support_grounded_repository_retry",
+                temperature=0.0,
+            )
+        except Exception as exc:
+            log.warning("Grounded repository retry unavailable: %s", exc)
+            grounded_retry = None
+        if grounded_retry and grounded_retry.get("action") == "answer":
+            retry_ids = _normalise_draft_evidence(grounded_retry)
+            if retry_ids and retry_ids.issubset(fact_ids):
+                log.info("Recovered a grounded repository answer after cautious draft")
+                draft = grounded_retry
+                draft_action = "answer"
     known_answer = (
         known_answer_hint if action == "answer" else ""
     )

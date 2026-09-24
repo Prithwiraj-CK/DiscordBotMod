@@ -7,7 +7,7 @@ from bot import (
     _historical_product_hint, _known_safe_answer, _repository_products,
     _staff_evidence_answer, _staff_history_evidence, _valhalla_capacity_answer,
 )
-from codebase_search import _workflow_queries
+from codebase_search import _priority_token_queries, _semantic_file_anchors, _workflow_queries
 from knowledge import retrieve_facts
 
 
@@ -22,6 +22,27 @@ class RepositoryReasoningTests(unittest.TestCase):
         queries = _workflow_queries(QUESTION)
         self.assertIn("verifyUserWalletConditions", queries)
         self.assertIn("retryOpenPositionJob", queries)
+
+    def test_repository_search_prioritises_specific_address_roles(self):
+        queries = _priority_token_queries(
+            "Why does a new Olympus wallet have signing, trading, and deposit addresses?"
+        )
+        self.assertEqual(["signing", "trading", "deposit"], queries)
+
+    def test_semantic_file_anchors_select_multiterm_wallet_documentation(self):
+        with self.subTest("does not rely on a one-line phrase"):
+            # The configured Olympus root is production repository data. This
+            # regression checks the generic multi-concept retriever, not a
+            # bespoke answer for this question.
+            from codebase_search import _root_for
+            root = _root_for("olympus")
+            if root is None:
+                self.skipTest("Olympus repository is not configured")
+            anchors = _semantic_file_anchors(
+                "Why does a new Olympus wallet have signing, trading, and deposit addresses?",
+                "olympus", root, limit=8,
+            )
+            self.assertTrue(any("WALLET_CREATION.md" in item["path"] for item in anchors))
 
     @patch("bot.retrieve_history")
     def test_matching_staff_history_routes_to_valhalla_without_becoming_evidence(self, mocked_history):

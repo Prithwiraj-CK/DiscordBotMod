@@ -52,6 +52,13 @@ class SupportPipelineTests(unittest.TestCase):
         detected = detect_product_feature("Which market is most active today?")
         self.assertEqual("unknown", detected["product"])
 
+    def test_plain_product_mention_does_not_invent_a_feature(self):
+        detected = detect_product_feature(
+            "Why does a new Olympus wallet have signing, trading, and deposit addresses?"
+        )
+        self.assertEqual("olympus", detected["product"])
+        self.assertEqual("unknown", detected["feature"])
+
     def test_conflicting_screenshot_values_do_not_replace_user_values(self):
         question = "In Olympus, Max Trade Size shows 5, but I want $1 per entry and $3 total with 2 additional entries."
         record = extract_question(question, detect_product_feature(question))

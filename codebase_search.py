@@ -27,6 +27,11 @@ _STOPWORDS = {
     "setting", "settings", "validates", "validation",
 }
 _TOKEN_RE = re.compile(r"[a-zA-Z][a-zA-Z0-9_/-]{2,}")
+_GENERIC_RESEARCH_TERMS = {
+    "address", "addresses", "app", "bot", "current", "have", "new",
+    "olympus", "product", "repo", "repository", "system", "thing",
+    "valhalla", "wallet", "wallets", "website",
+}
 _HEADING_RE = re.compile(r"^\s{0,3}(#{1,6})\s+(.+?)\s*$")
 _SYMBOL_RE = re.compile(
     r"^\s*(?:(?:export|default|public|private|protected|static|async)\s+)*"
@@ -153,6 +158,33 @@ def _single_token_queries(query: str) -> list[str]:
         if token.lower() not in _STOPWORDS and len(token) > 3
     ]
     return list(dict.fromkeys(tokens))[:5]
+
+
+def _priority_token_queries(query: str) -> list[str]:
+    """Return the user's informative terms before generic product wording.
+
+    A phrase such as ``Olympus wallet`` occurs throughout the repository and
+    can otherwise fill the entire evidence packet before ``signing`` or
+    ``deposit`` is searched.  Preserve the user's word order, but defer names
+    of products and other generic nouns.  If the user used only broad terms,
+    use the existing semantic vocabulary as a bounded fallback.
+    """
+    clean = re.sub(r"\[ATTACHED IMAGE CONTEXT.*?\]", " ", query or "", flags=re.S)
+    direct = [
+        token.lower() for token in _TOKEN_RE.findall(clean)
+        if token.lower() not in _STOPWORDS
+        and token.lower() not in _GENERIC_RESEARCH_TERMS
+        and len(token) > 3
+    ]
+    if direct:
+        return list(dict.fromkeys(direct))[:5]
+    semantic = [
+        term for term in _semantic_terms(clean)
+        if term not in _STOPWORDS
+        and term not in _GENERIC_RESEARCH_TERMS
+        and len(term) > 3
+    ]
+    return sorted(set(semantic))[:5]
 
 
 def _workflow_queries(query: str) -> list[str]:
@@ -435,6 +467,91 @@ def _reference_anchors(query: str, product: str, root: Path, initial: list[dict]
     return output
 
 
+def _semantic_file_anchors(query: str, product: str, root: Path, limit: int) -> list[dict]:
+    """Find files where several specific user concepts co-occur.
+
+    Fixed-string searches are excellent for exact labels, but a repository
+    document often explains related roles on different lines: for example,
+    signing, trading, and deposit addresses.  Intersecting bounded fixed-string
+    file lists identifies that document without handing path selection to a
+    model or using user-supplied regular expressions.
+    """
+    rg = _rg_path()
+    terms = _priority_token_queries(query)
+    if rg is None or len(terms) < 2:
+        return []
+    matches: dict[str, set[str]] = {}
+    for term in terms:
+        args = [
+            rg, "-l", "--color", "never", "--fixed-strings", "--ignore-case",
+            "--no-follow", "--max-count", "1", "--max-filesize", "4M",
+        ]
+        for glob in _EXCLUDED_GLOBS:
+            args.extend(["--glob", glob])
+        args.extend([term, str(root)])
+        try:
+            completed = subprocess.run(
+                args, capture_output=True, text=True, timeout=10.0, check=False,
+            )
+        except (OSError, subprocess.TimeoutExpired) as exc:
+            log.warning("Semantic file search failed for %s: %s", root.name, exc)
+            return []
+        if completed.returncode not in (0, 1):
+            continue
+        for raw_path in completed.stdout.splitlines():
+            try:
+                path = Path(raw_path).resolve(strict=True)
+                relative = path.relative_to(root).as_posix()
+            except (OSError, RuntimeError, ValueError):
+                continue
+            if _is_safe_text_file(path):
+                matches.setdefault(relative, set()).add(term)
+
+    candidates = []
+    for relative, matched_terms in matches.items():
+        if len(matched_terms) < 2:
+            continue
+        path = root / relative
+        lines = _read_text(path).splitlines()
+        if not lines:
+            continue
+        line_number = 1
+        for number, line in enumerate(lines, 1):
+            lowered = line.casefold()
+            if any(term in lowered for term in matched_terms):
+                line_number = number
+                break
+        normalized_path = relative.casefold()
+        score = len(matched_terms) * 100
+        if "/docs/" in "/{}".format(normalized_path):
+            score += 30
+        if "wallet" in normalized_path:
+            score += 20
+        if any(marker in normalized_path for marker in ("handoff", "test", "plan", "audit", "debug")):
+            score -= 40
+        candidates.append((score, relative, line_number, sorted(matched_terms)))
+
+    candidates.sort(key=lambda item: (-item[0], item[1].lower(), item[2]))
+    output = []
+    for _, relative, line_number, matched_terms in candidates[:max(1, limit)]:
+        output.append({
+            "id": "codebase.{}.{}.{}.semantic".format(product, relative, line_number),
+            "product": product,
+            "source_type": "codebase_semantic",
+            "source": "{}:{} (multi-concept repository match)".format(relative, line_number),
+            "path": relative,
+            "line": line_number,
+            "fact": "Repository file matches the support concepts: {}.".format(
+                ", ".join(matched_terms),
+            ),
+            "answer_guidance": (
+                "Semantic repository anchor only; read the complete surrounding "
+                "documentation section or function before making a support claim."
+            ),
+        })
+    return output
+
+
 def search_codebase(query: str, product: str | None, limit: int = 32) -> list[dict]:
     """Return many short, redacted excerpts for an agent research pass.
 
@@ -451,14 +568,15 @@ def search_codebase(query: str, product: str | None, limit: int = 32) -> list[di
     results: list[dict] = []
     seen: set[str] = set()
 
-    def run_patterns(patterns):
+    def run_patterns(patterns, per_pattern_limit=32):
         for pattern in patterns:
             if len(results) >= min(64, max(1, limit)):
                 break
+            pattern_matches = 0
             args = [
                 rg, "-n", "--no-heading", "--color", "never", "--fixed-strings",
                 "--ignore-case",
-                "--no-follow", "--max-count", "32", "--max-filesize", "4M",
+                "--no-follow", "--max-count", str(max(1, per_pattern_limit)), "--max-filesize", "4M",
             ]
             for glob in _EXCLUDED_GLOBS:
                 args.extend(["--glob", glob])
@@ -505,22 +623,32 @@ def search_codebase(query: str, product: str | None, limit: int = 32) -> list[di
                     "fact": safe_line,
                     "answer_guidance": "Current implementation excerpt; use only for exact behavior directly supported by this line.",
                 })
+                pattern_matches += 1
+                if pattern_matches >= max(1, per_pattern_limit):
+                    break
                 if len(results) >= min(64, max(1, limit)):
                     break
 
+    # Search the concrete terms the user supplied before generic phrases such
+    # as "Olympus wallet". Each token gets a small quota so one very common
+    # term cannot consume the entire packet. This is what lets a question
+    # about signing, trading, and deposit addresses reach its precise wallet
+    # documentation instead of unrelated product-name matches.
+    semantic = _semantic_file_anchors(query, str(product), root, limit=8)
+    run_patterns(_priority_token_queries(query), per_pattern_limit=8)
     # Search execution anchors before the user's natural-language phrasing.
     # This keeps a generic "balance" match from crowding out the exact
     # balance-check/retry/skip workflow that answers the question.
-    run_patterns(_workflow_queries(query))
-    run_patterns(_queries(query))
+    run_patterns(_workflow_queries(query), per_pattern_limit=16)
+    run_patterns(_queries(query), per_pattern_limit=8)
     # A single generic word is too noisy. Use it only if no phrase search found
     # anything, so a precise match such as "jup score" cannot be crowded out.
     if not results:
-        run_patterns(_single_token_queries(query))
+        run_patterns(_single_token_queries(query), per_pattern_limit=8)
     structural = _structural_search(query, str(product), root, limit=max(8, min(24, limit)))
     # Structural anchors get first chance to expose the surrounding workflow,
     # while exact content matches remain available for the evidence reviewer.
-    combined = (results + structural)[:min(64, max(1, limit))]
+    combined = (semantic + results + structural)[:min(64, max(1, limit))]
     combined.extend(_reference_anchors(query, str(product), root, combined, limit=8))
     return combined[:min(72, max(1, limit + 8))]
 

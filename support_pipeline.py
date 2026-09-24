@@ -67,17 +67,30 @@ def _terms(text: str, product: str, feature: str) -> tuple[list[str], list[str]]
 
 
 def detect_product_feature(text: str, prior_product: str | None = None) -> dict[str, Any]:
-    """Use exact UI labels before ambiguous natural-language routing."""
+    """Use exact UI labels before ambiguous natural-language routing.
+
+    Product names identify a repository, not a feature.  Treating every
+    Olympus mention as every Olympus feature used to make a plain wallet
+    question look like an ``autobond`` question simply because that feature
+    sorted first.  Feature confidence must come from a feature label or alias;
+    the product can still be known when the feature is not.
+    """
     candidates = []
+    product_scores: dict[str, int] = {}
     for product, product_definition in PRODUCT_REGISTRY.items():
+        product_aliases = [
+            alias for alias in product_definition["aliases"] if _contains(text, alias)
+        ]
+        product_scores[product] = len(product_aliases) * 12 + (4 if product == prior_product else 0)
         for feature in product_definition["features"]:
-            labels, aliases = _terms(text, product, feature)
+            definition = product_definition["features"][feature]
+            labels = [label for label in definition["labels"] if _contains(text, label)]
+            aliases = [alias for alias in definition["aliases"] if _contains(text, alias)]
             # Exact labels are intentionally decisive. Generic terms such as
             # "market" alone never enter this registry.
             score = len(labels) * 100 + len(aliases) * 12
-            if product == prior_product:
-                score += 4
-            if score:
+            if labels or aliases:
+                score += product_scores[product]
                 candidates.append({
                     "product": product,
                     "feature": feature,
@@ -87,6 +100,14 @@ def detect_product_feature(text: str, prior_product: str | None = None) -> dict[
                 })
     candidates.sort(key=lambda item: (-item["score"], item["product"], item["feature"]))
     selected = candidates[0] if candidates else None
+    selected_product = selected["product"] if selected else "unknown"
+    if selected is None:
+        known_products = [
+            (score, product) for product, score in product_scores.items() if score
+        ]
+        if known_products:
+            known_products.sort(key=lambda item: (-item[0], item[1]))
+            selected_product = known_products[0][1]
     runner_up = candidates[1] if len(candidates) > 1 else None
     confidence = 0.0
     if selected:
@@ -94,7 +115,7 @@ def detect_product_feature(text: str, prior_product: str | None = None) -> dict[
         if runner_up and runner_up["score"] >= selected["score"] * 0.85:
             confidence = min(confidence, 0.65)
     return {
-        "product": selected["product"] if selected else "unknown",
+        "product": selected_product,
         "feature": selected["feature"] if selected else "unknown",
         "confidence": round(confidence, 2),
         "exact_labels": selected["exact_labels"] if selected else [],
@@ -295,6 +316,7 @@ def rank_evidence(items: list[dict[str, Any]], query: str, detection: dict[str, 
         "codebase_section": 60,
         "codebase_file": 55,
         "codebase_context": 50,
+        "codebase_semantic": 48,
         "codebase": 42,
         "codebase_structure": 35,
         "codebase_reference": 25,
