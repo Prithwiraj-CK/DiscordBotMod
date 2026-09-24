@@ -199,7 +199,9 @@ def _format_report(since, until, totals):
         "{} ({})".format(model, count)
         for model, count in sorted(totals["models"].items())
     ) or "none"
-    cost = "${:.4f}".format(totals["estimated_cost_usd"])
+    # A support message is typically far below one cent. Six decimals keeps a
+    # real low cost from looking like $0.0000 in Discord.
+    cost = "${:.6f}".format(totals["estimated_cost_usd"])
     if totals["unknown_cost_calls"]:
         cost += " + {} call(s) with unknown model pricing".format(totals["unknown_cost_calls"])
     return (
@@ -237,10 +239,12 @@ def send_due_report(now=None):
     current = float(time.time() if now is None else now)
     with _LOCK:
         state = _load_state()
-        previous = float(state.get("last_report_at", current - _SECONDS_PER_DAY))
-        if current - previous < _SECONDS_PER_DAY:
+        last_report_at = float(state.get("last_report_at", current - _SECONDS_PER_DAY))
+        if current - last_report_at < _SECONDS_PER_DAY:
             return False
-        payload = _report_payload(previous, current)
+        # The report always means "the last 24 hours", rather than a period
+        # beginning when this particular Discord message was created.
+        payload = _report_payload(current - _SECONDS_PER_DAY, current)
         try:
             response = requests.post(_webhook_wait_url(url), json=payload, timeout=10)
             response.raise_for_status()
@@ -266,9 +270,9 @@ def update_current_report(now=None):
     current = float(time.time() if now is None else now)
     with _LOCK:
         state = _load_state()
-        previous = float(state.get("last_report_at", current - _SECONDS_PER_DAY))
+        last_report_at = float(state.get("last_report_at", current - _SECONDS_PER_DAY))
         message_id = str(state.get("message_id") or "")
-        if current - previous >= _SECONDS_PER_DAY or not message_id:
+        if current - last_report_at >= _SECONDS_PER_DAY or not message_id:
             # Legacy reports were posted before we tracked a Discord message
             # ID. Start one new editable report instead of posting every time.
             state["last_report_at"] = current - _SECONDS_PER_DAY
@@ -277,7 +281,7 @@ def update_current_report(now=None):
         try:
             response = requests.patch(
                 "{}/messages/{}".format(url, message_id),
-                json=_report_payload(previous, current),
+                json=_report_payload(current - _SECONDS_PER_DAY, current),
                 timeout=10,
             )
             response.raise_for_status()
