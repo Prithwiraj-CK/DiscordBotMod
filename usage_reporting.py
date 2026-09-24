@@ -335,7 +335,10 @@ def start_daily_usage_reporter():
 
 
 def _report_loop():
-    send_due_report()
+    if not send_due_report():
+        # Migrate a report created by older code, which did not retain the
+        # Discord message ID required for edits, into one editable live report.
+        update_current_report()
     # Polling makes a failed webhook edit retry on the next five-minute
     # interval, without claiming a successful update in the persistent state.
     while not _STOP.wait(300):
