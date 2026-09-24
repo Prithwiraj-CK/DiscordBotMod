@@ -5,7 +5,7 @@ from unittest.mock import patch
 
 from bot import (
     _historical_product_hint, _known_safe_answer, _repository_products,
-    _staff_history_evidence, _valhalla_capacity_answer,
+    _staff_evidence_answer, _staff_history_evidence, _valhalla_capacity_answer,
 )
 from codebase_search import _workflow_queries
 from knowledge import retrieve_facts
@@ -106,6 +106,39 @@ class RepositoryReasoningTests(unittest.TestCase):
             }],
         )
         self.assertEqual([], evidence)
+
+    def test_staff_handoff_is_not_promoted_as_an_answer(self):
+        evidence = _staff_history_evidence(
+            "Can I start Olympus copy trading with only $2?",
+            "olympus",
+            [{
+                "id": "handoff",
+                "is_staff": True,
+                "channel_name": "general",
+                "question_context": "Can I start copy trading with only $2?",
+                "content": "Can just wait for a mod to help.",
+            }],
+        )
+        self.assertEqual([], evidence)
+
+    def test_staff_answer_is_retained_as_the_general_fallback(self):
+        evidence = _staff_history_evidence(
+            "Can I start Olympus copy trading with only $2?",
+            "olympus",
+            [{
+                "id": "minimum-copy",
+                "is_staff": True,
+                "channel_name": "general",
+                "question_context": "Can I start copy trading using $2?",
+                "content": (
+                    "You can, but $2 will not keep up copying a wallet because "
+                    "the minimum market position is $1."
+                ),
+            }],
+        )
+        fallback = _staff_evidence_answer(evidence)
+        self.assertEqual(["staff_history.minimum-copy"], fallback["evidence_ids"])
+        self.assertIn("$2", fallback["answer"])
 
     @patch("bot.REPOSITORY_SEARCH_BOTH", True)
     def test_repository_research_checks_both_fixed_roots(self):

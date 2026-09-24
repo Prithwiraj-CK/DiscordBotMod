@@ -1804,6 +1804,12 @@ _HISTORY_ROUTING_STOPWORDS = {
     "not", "the", "this", "use", "what", "when", "where", "which",
     "with", "would", "you", "your", "olympus", "valhalla",
 }
+_STAFF_HANDOFF_RE = re.compile(
+    r"\b(?:wait\s+for\s+(?:a\s+)?mod|someone\s+(?:will|can)\s+help|"
+    r"get\s+(?:the\s+)?team|not\s+(?:sure|100%)|check\s+(?:it|that)\s+later|"
+    r"ask\s+(?:the\s+)?team)\b",
+    re.IGNORECASE,
+)
 
 
 def _history_terms(text):
@@ -1811,6 +1817,14 @@ def _history_terms(text):
         word.casefold() for word in re.findall(r"[A-Za-z][A-Za-z0-9_-]{2,}", str(text or ""))
         if word.casefold() not in _HISTORY_ROUTING_STOPWORDS
     }
+
+
+def _usable_staff_answer(text):
+    """Reject old staff handoffs before they can become answer evidence."""
+    answer = str(text or "").strip()
+    if len(answer) < 24 or _STAFF_HANDOFF_RE.search(answer):
+        return ""
+    return answer
 
 
 def _staff_history_evidence(query, product, history_items):
@@ -1833,7 +1847,7 @@ def _staff_history_evidence(query, product, history_items):
     for item in history_items or []:
         if not item.get("is_staff"):
             continue
-        answer = str(item.get("content") or "").strip()
+        answer = _usable_staff_answer(item.get("content"))
         customer_question = str(item.get("question_context") or "").strip()
         if not answer or not customer_question:
             continue
@@ -1872,6 +1886,32 @@ def _staff_history_evidence(query, product, history_items):
             ),
         })
     return evidence
+
+
+def _staff_evidence_answer(staff_excerpts):
+    """Return the strongest already-vetted staff answer as an audit-safe fallback."""
+    for item in staff_excerpts or []:
+        answer = _usable_staff_answer(item.get("fact"))
+        evidence_id = str(item.get("id") or "")
+        if answer and evidence_id:
+            return {"answer": answer, "evidence_ids": [evidence_id]}
+    return None
+
+
+def _staff_fallback_decision(product, intent, fallback):
+    """Render an already-vetted general staff answer in the normal decision shape."""
+    answer = fallback["answer"]
+    evidence_ids = list(fallback["evidence_ids"])
+    return {
+        "action": "answer", "product": product, "intent": intent,
+        "risk": "low", "confidence": 0.9,
+        "evidence_ids": evidence_ids, "missing_information": [],
+        "draft_answer": answer,
+        "claim_evidence": [{
+            "claim": answer[:400], "evidence_ids": evidence_ids,
+        }],
+        "unsupported_claims": [],
+    }
 
 
 def _routing_context(turns, max_turns=6, max_chars=3500):
@@ -2581,6 +2621,13 @@ def autonomous_decision(query, turns, product_hint=None, force_reply=False):
             if str(item.get("id", "")) in selected_ids
             and str(item.get("id", "")) not in existing_ids
         )
+    # The selected staff answer must survive generic code/fact reranking. It
+    # is a vetted general-answer fallback, not merely style context.
+    existing_ids = {str(item.get("id", "")) for item in facts}
+    facts.extend(
+        item for item in staff_evidence_by_id.values()
+        if str(item.get("id", "")) not in existing_ids
+    )
     codebase_excerpts = [
         item for item in facts if str(item.get("source_type", "")).startswith("codebase")
     ]
@@ -2655,6 +2702,13 @@ def autonomous_decision(query, turns, product_hint=None, force_reply=False):
             "evidence_ids": sorted(fact_ids), "missing_information": [],
             "draft_answer": ESCALATE, "unsupported_claims": [],
         }
+    staff_fallback = _staff_evidence_answer(staff_excerpts)
+    if action in {"clarify", "escalate"} and staff_fallback:
+        # The router may be conservative around a term it has not seen before,
+        # but a closely matched, safe staff answer is stronger than a generic
+        # handoff. Return the source-backed answer exactly rather than letting
+        # a later drafter discard it because it lacks an approved FAQ ID.
+        return _staff_fallback_decision(product, intent, staff_fallback)
     # The initial router is allowed to be cautious, but it is not allowed to
     # stop research on a general implementation question. If repository or
     # approved answer evidence was found, let the drafter test that evidence
@@ -2755,6 +2809,10 @@ def autonomous_decision(query, turns, product_hint=None, force_reply=False):
         temperature=0.2,
     )
     draft_action = draft.get("action")
+    if staff_fallback and draft_action != "answer":
+        # A later drafting model must not replace a direct, vetted staff
+        # answer with a generic clarification or handoff.
+        return _staff_fallback_decision(product, intent, staff_fallback)
     known_answer = (
         known_answer_hint if action == "answer" else ""
     )
