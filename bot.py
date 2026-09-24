@@ -1710,6 +1710,8 @@ def _known_safe_answer(query, product, facts):
             return fact_map.get("valhalla.copy_trade.wallet_discovery", {}).get("fact", "")
 
     if product == "olympus":
+        if re.search(r"\bwhat\s+(?:does|do)\b.{0,40}\bredeem(?:ed|ing)?\b|\bredeem(?:ed|ing)?\b.{0,40}\bmean\b", lowered):
+            return fact_map.get("olympus.redemption.definition", {}).get("fact", "")
         if "newly created" in lowered and "deposit wallet" in lowered and "gasless" in lowered:
             return fact_map.get("olympus.wallets.gas_model", {}).get("fact", "")
         if re.search(r"\b(find|choose|select)\b.*\b(wallet|trader)\b.*\b(copy|follow)\b", lowered):
@@ -2683,6 +2685,11 @@ def autonomous_decision(query, turns, product_hint=None, force_reply=False):
             })
         elif product == "valhalla" and re.search(r"\b(?:dlmm\s+)?ratio\b", lowered_query):
             known_ids.add("valhalla.copy_trade.ratio")
+        elif product == "olympus" and re.search(
+            r"\bwhat\s+(?:does|do)\b.{0,40}\bredeem(?:ed|ing)?\b|\bredeem(?:ed|ing)?\b.{0,40}\bmean\b",
+            lowered_query,
+        ):
+            known_ids.add("olympus.redemption.definition")
         draft["evidence_ids"] = sorted(known_ids & fact_ids) or sorted(fact_ids)
         draft["claim_evidence"] = [{
             "claim": known_answer[:400],

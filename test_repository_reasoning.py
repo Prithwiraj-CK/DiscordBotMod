@@ -3,8 +3,9 @@
 import unittest
 from unittest.mock import patch
 
-from bot import _historical_product_hint, _valhalla_capacity_answer
+from bot import _historical_product_hint, _known_safe_answer, _valhalla_capacity_answer
 from codebase_search import _workflow_queries
+from knowledge import retrieve_facts
 
 
 QUESTION = (
@@ -65,6 +66,14 @@ class RepositoryReasoningTests(unittest.TestCase):
             "fact": "verifyUserWalletConditions minimumRequiredBalance",
         }])
         self.assertIsNone(result)
+
+    def test_redeemed_definition_is_answerable_but_not_an_account_claim(self):
+        question = "What does redeemed mean in Olympus?"
+        facts = retrieve_facts(question, product="olympus", intent="unknown", limit=10)
+        self.assertIn("olympus.redemption.definition", {item["id"] for item in facts})
+        answer = _known_safe_answer(question, "olympus", facts)
+        self.assertIn("resolved market", answer)
+        self.assertIn("USDC", answer)
 
 
 if __name__ == "__main__":

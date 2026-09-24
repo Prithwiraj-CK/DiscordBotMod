@@ -428,6 +428,19 @@
       "approved": true
     },
     {
+      "id": "olympus.redemption.definition",
+      "product": "olympus",
+      "topic": "market_redemption",
+      "action": "answer",
+      "fact": "In Olympus, Redeemed means a position in a resolved market has been claimed or settled. For winning shares, this converts the shares back into USDC.",
+      "answer_guidance": "Use this only for a general definition. A user's missing, stuck, pending, failed, or incorrect redemption remains an account-specific escalation.",
+      "retrieval_terms": ["redeemed", "redeeming", "what does redeemed mean", "claim winning shares", "resolved market"],
+      "source": {"kind": "approved_staff_example", "ref": "Olympus general staff reply 1535011277150359612, cross-checked against the current redeem event implementation"},
+      "last_verified": "2026-09-25",
+      "risk": "low",
+      "approved": true
+    },
+    {
       "id": "valhalla.onboarding.follow_wallet_setup",
       "product": "valhalla",
       "topic": "onboarding",

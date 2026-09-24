@@ -166,6 +166,11 @@ activate from trading.
 
 ## Common questions
 
+**What does Redeemed mean?** It means a position in a resolved market has been
+claimed or settled. Winning shares are converted back into USDC. This is a
+general status definition only; a redemption that is missing, pending, stuck,
+or incorrect needs account-specific investigation.
+
 **Why did my copy not match the leader's size?** Copy sizing is driven by the
 follower's own settings and the Copy-Sell Percentage, not a 1:1 share match.
 If the numbers still look wrong, escalate rather than explaining the discrepancy.
