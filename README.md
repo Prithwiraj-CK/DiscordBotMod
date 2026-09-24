@@ -113,7 +113,16 @@ The service restarts after a gateway failure and writes logs to `.runtime/`.
 It cannot run while the Mac is powered off or asleep, and it always forces
 `SHADOW_MODE=true`.
 
-### 5. Validate the knowledge corpus
+### 5. Monitor model usage
+
+Salena uses `gpt-6-luna` through the Responses API with configurable reasoning
+(`OPENAI_REASONING_EFFORT=medium` by default). Set
+`DAILY_USAGE_WEBHOOK_URL` in the ignored `.env` to receive one report every
+24 hours with estimated API cost, calls, input/cache-write/output/reasoning
+tokens, and model counts. The local `.runtime/openai_usage.jsonl` ledger stores
+only those counts and cost metadata—never Discord text, prompts, or replies.
+
+### 6. Validate the knowledge corpus
 
 The approved source-of-truth index and anonymized regression cases can be
 checked offline before changing live replies:
@@ -200,8 +209,9 @@ nothing almost every time.
 - **Threads, not async.** discum is synchronous, so answers are produced on a
   small `ThreadPoolExecutor`. The gateway callback must return immediately:
   blocking it stalls the heartbeat and drops the connection.
-- **Model swap.** Every model call goes through `ask_llm()` in `llm.py`. Claude
-  version is in a comment at the bottom of that file — swapping is one edit.
+- **Model calls.** Every model call goes through `llm.py`, which uses the
+  Responses API so the configured reasoning model can plan and validate support
+  research. Model responses are requested with `store=False`.
 - **Escalation is deliberate.** The prompt tells the model to escalate rather
   than guess, so a thin `knowledge/` means lots of handoffs. Fix that by
   writing more knowledge, not by softening the prompt — a confidently wrong

@@ -13,14 +13,16 @@ before it calls load_dotenv(), so anything read at import would see an empty
 .env. Config is read inside the functions instead.
 """
 
-import logging
 import json
+import logging
 import os
 import random
 import time
 
 import openai
 from openai import OpenAI
+
+from usage_reporting import record_usage
 
 log = logging.getLogger("support-bot.llm")
 
@@ -75,6 +77,20 @@ def _max_attempts():
         return 3
 
 
+def _model_name():
+    """The active model is read per call so a restarted service picks up .env."""
+    return os.getenv("OPENAI_MODEL", "gpt-6-luna").strip() or "gpt-6-luna"
+
+
+def _reasoning_effort():
+    """Return a supported GPT-6 reasoning effort without trusting a typo in .env."""
+    value = os.getenv("OPENAI_REASONING_EFFORT", "medium").strip().lower()
+    if value in {"none", "low", "medium", "high", "xhigh", "max"}:
+        return value
+    log.warning("Unknown OPENAI_REASONING_EFFORT=%r; using medium", value)
+    return "medium"
+
+
 def _get_client():
     """Built on first use, not at import, so .env is loaded by the time we read it."""
     global _client
@@ -89,12 +105,65 @@ def _get_client():
     return _client
 
 
+def _response_input(messages):
+    """Translate the existing chat transcript into Responses API input items.
+
+    Keeping the public ``ask_llm``/``ask_json`` signatures unchanged lets the
+    support pipeline move to GPT-6 without weakening its existing evidence and
+    validation gates. Images remain remote Discord CDN URLs; no attachment is
+    downloaded or persisted by this module.
+    """
+    items = []
+    for message in messages:
+        role = str(message.get("role") or "user")
+        content = message.get("content")
+        if isinstance(content, str):
+            parts = [{
+                "type": "output_text" if role == "assistant" else "input_text",
+                "text": content,
+            }]
+        elif isinstance(content, list):
+            parts = []
+            for part in content:
+                if not isinstance(part, dict):
+                    continue
+                kind = part.get("type")
+                if kind == "text":
+                    parts.append({
+                        "type": "output_text" if role == "assistant" else "input_text",
+                        "text": str(part.get("text") or ""),
+                    })
+                elif kind == "image_url" and role != "assistant":
+                    image = part.get("image_url") or {}
+                    url = str(image.get("url") or "").strip()
+                    if url:
+                        image_part = {"type": "input_image", "image_url": url}
+                        detail = image.get("detail")
+                        if detail:
+                            image_part["detail"] = detail
+                        parts.append(image_part)
+        else:
+            parts = []
+        if parts:
+            items.append({"role": role, "content": parts})
+    return items
+
+
+def _record_response_usage(response, model):
+    """Best-effort accounting must never make a support reply fail."""
+    try:
+        record_usage(model, getattr(response, "usage", None))
+    except Exception:
+        log.exception("Could not record OpenAI usage")
+
+
 def ask_llm(system_prompt, messages):
     """Send a conversation to the model and return its reply text.
 
     messages is a list of {"role": "user"|"assistant", "content": str}
-    entries. For vision calls, content may instead be the Chat Completions
-    list of text/image parts, oldest first.
+    entries. For vision calls, content may instead be a text/image-part list,
+    oldest first. The function uses the Responses API so GPT-6 Luna can apply
+    reasoning; Responses are not stored by OpenAI for this bot.
 
     Raises LLMUnavailable when the model could not be reached. Callers must
     treat that as "no answer yet" rather than "no answer": a dropped question
@@ -105,13 +174,17 @@ def ask_llm(system_prompt, messages):
 
     for attempt in range(1, attempts + 1):
         try:
-            response = _get_client().chat.completions.create(
-                model=os.getenv("OPENAI_MODEL", "gpt-4o-mini"),
-                messages=[{"role": "system", "content": system_prompt}, *messages],
-                max_tokens=400,
-                temperature=_temperature(),
+            model = _model_name()
+            response = _get_client().responses.create(
+                model=model,
+                instructions=system_prompt,
+                input=_response_input(messages),
+                max_output_tokens=400,
+                reasoning={"effort": _reasoning_effort()},
+                store=False,
             )
-            return (response.choices[0].message.content or "").strip()
+            _record_response_usage(response, model)
+            return (response.output_text or "").strip()
 
         except openai.AuthenticationError as exc:
             raise LLMUnavailable("OpenAI rejected the API key: {}".format(exc)) from exc
@@ -147,25 +220,31 @@ def ask_json(system_prompt, messages, schema, name="structured_response", temper
     """
     attempts = _max_attempts()
     last_error = None
-    response_format = {
+    # ``temperature`` remains an accepted argument for compatibility with the
+    # callers, but reasoning models do not support it. Their effort setting is
+    # the deliberate, supported control instead.
+    del temperature
+    text_format = {
         "type": "json_schema",
-        "json_schema": {
-            "name": name,
-            "strict": True,
-            "schema": schema,
-        },
+        "name": name,
+        "strict": True,
+        "schema": schema,
     }
 
     for attempt in range(1, attempts + 1):
         try:
-            response = _get_client().chat.completions.create(
-                model=os.getenv("OPENAI_MODEL", "gpt-4o-mini"),
-                messages=[{"role": "system", "content": system_prompt}, *messages],
-                max_tokens=500,
-                temperature=temperature,
-                response_format=response_format,
+            model = _model_name()
+            response = _get_client().responses.create(
+                model=model,
+                instructions=system_prompt,
+                input=_response_input(messages),
+                max_output_tokens=500,
+                reasoning={"effort": _reasoning_effort()},
+                text={"format": text_format},
+                store=False,
             )
-            content = (response.choices[0].message.content or "").strip()
+            _record_response_usage(response, model)
+            content = (response.output_text or "").strip()
             if not content:
                 raise LLMUnavailable("OpenAI returned an empty structured response")
             try:

@@ -62,6 +62,7 @@ from support_pipeline import (
     analysis_log, calculate_support_values, detect_product_feature,
     extract_question, format_calculation_response, rank_evidence,
 )
+from usage_reporting import start_daily_usage_reporter
 
 load_dotenv()
 
@@ -3209,6 +3210,7 @@ def main():
     global _gateway_started_monotonic, _gateway_last_signal_monotonic
 
     _started_at = datetime.now(timezone.utc)
+    start_daily_usage_reporter()
     with _gateway_health_lock:
         _gateway_started_monotonic = time.monotonic()
         _gateway_last_signal_monotonic = _gateway_started_monotonic
