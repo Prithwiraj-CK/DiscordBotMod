@@ -62,7 +62,7 @@ from support_pipeline import (
     analysis_log, calculate_support_values, detect_product_feature,
     extract_question, format_calculation_response, rank_evidence,
 )
-from usage_reporting import start_daily_usage_reporter
+from usage_reporting import request_usage_report_update, start_daily_usage_reporter
 
 load_dotenv()
 
@@ -2932,6 +2932,11 @@ def _answer_safely(message):
         _answer(message)
     except Exception:
         log.exception("Unexpected error answering message %s", message.get("id"))
+    finally:
+        # A support turn can make several model calls (route, research, draft,
+        # validation). Publish one new rolling cost snapshot only after the
+        # turn is done, rather than editing a message or spamming one per call.
+        request_usage_report_update()
 
 
 # A URL's query string is full of question marks. "look at this

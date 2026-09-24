@@ -1,4 +1,4 @@
-"""Private local accounting and a daily operational usage report.
+"""Private local accounting and rolling operational usage snapshots.
 
 The ledger deliberately contains only usage counts, model identifiers, and
 calculated cost. It never records Discord messages, prompts, completions, API
@@ -114,7 +114,6 @@ def record_usage(model, usage, now=None):
         path.parent.mkdir(parents=True, exist_ok=True)
         with _LOCK, path.open("a", encoding="utf-8") as handle:
             handle.write(json.dumps(event, separators=(",", ":")) + "\n")
-        request_usage_report_update()
     except OSError:
         log.exception("Could not write local OpenAI usage ledger")
 
@@ -192,7 +191,7 @@ def summarize_usage(since, until):
     return totals
 
 
-def _format_report(since, until, totals):
+def _format_report(since, until, totals, title="Salena daily OpenAI usage"):
     start = datetime.fromtimestamp(since, timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
     end = datetime.fromtimestamp(until, timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
     model_text = ", ".join(
@@ -205,14 +204,14 @@ def _format_report(since, until, totals):
     if totals["unknown_cost_calls"]:
         cost += " + {} call(s) with unknown model pricing".format(totals["unknown_cost_calls"])
     return (
-        "**Salena daily OpenAI usage**\n"
+        "**{}**\n"
         "Window: {} → {}\n"
         "Estimated cost: **{}**\n"
         "Calls: {} · Models: {}\n"
         "Read: {:,} input tokens ({:,} cached; {:,} cache-write)\n"
         "Wrote: {:,} output tokens ({:,} reasoning)"
     ).format(
-        start, end, cost, totals["calls"], model_text,
+        title, start, end, cost, totals["calls"], model_text,
         totals["input_tokens"], totals["cached_input_tokens"], totals["cache_write_tokens"],
         totals["output_tokens"], totals["reasoning_tokens"],
     )
@@ -224,11 +223,27 @@ def _webhook_wait_url(url):
     return url + separator + "wait=true"
 
 
-def _report_payload(since, until):
+def _report_payload(since, until, title="Salena daily OpenAI usage"):
     return {
-        "content": _format_report(since, until, summarize_usage(since, until)),
+        "content": _format_report(since, until, summarize_usage(since, until), title),
         "allowed_mentions": {"parse": []},
     }
+
+
+def _post_report(since, until, title):
+    """Post one immutable webhook snapshot and return whether it was accepted."""
+    url = os.getenv("DAILY_USAGE_WEBHOOK_URL", "").strip()
+    if not url:
+        return False
+    try:
+        response = requests.post(
+            _webhook_wait_url(url), json=_report_payload(since, until, title), timeout=10,
+        )
+        response.raise_for_status()
+        return True
+    except requests.exceptions.RequestException as exc:
+        log.warning("Could not send usage report: %s", exc)
+        return False
 
 
 def send_due_report(now=None):
@@ -244,55 +259,29 @@ def send_due_report(now=None):
             return False
         # The report always means "the last 24 hours", rather than a period
         # beginning when this particular Discord message was created.
-        payload = _report_payload(current - _SECONDS_PER_DAY, current)
-        try:
-            response = requests.post(_webhook_wait_url(url), json=payload, timeout=10)
-            response.raise_for_status()
-            body = response.json()
-            message_id = str(body.get("id") or "")
-        except requests.exceptions.RequestException as exc:
-            log.warning("Could not send daily usage report: %s", exc)
+        if not _post_report(current - _SECONDS_PER_DAY, current, "Salena daily OpenAI usage"):
             return False
-        except (ValueError, AttributeError, TypeError):
-            # The post succeeded but Discord did not return an editable message
-            # object. Keep reporting daily and create a fresh editable report on
-            # the next usage event instead of losing accounting altogether.
-            message_id = ""
-        _save_state({"last_report_at": current, "message_id": message_id})
+        _save_state({"last_report_at": current})
         return True
 
 
 def update_current_report(now=None):
-    """Edit the active report in place with the latest rolling 24-hour totals."""
-    url = os.getenv("DAILY_USAGE_WEBHOOK_URL", "").strip()
-    if not url:
-        return False
+    """Backward-compatible name: publish, never edit, a rolling snapshot."""
+    return send_usage_snapshot(now)
+
+
+def send_usage_snapshot(now=None):
+    """Post a new rolling 24-hour snapshot after one completed support turn."""
     current = float(time.time() if now is None else now)
-    with _LOCK:
-        state = _load_state()
-        last_report_at = float(state.get("last_report_at", current - _SECONDS_PER_DAY))
-        message_id = str(state.get("message_id") or "")
-        if current - last_report_at >= _SECONDS_PER_DAY or not message_id:
-            # Legacy reports were posted before we tracked a Discord message
-            # ID. Start one new editable report instead of posting every time.
-            state["last_report_at"] = current - _SECONDS_PER_DAY
-            _save_state(state)
-            return send_due_report(current)
-        try:
-            response = requests.patch(
-                "{}/messages/{}".format(url, message_id),
-                json=_report_payload(current - _SECONDS_PER_DAY, current),
-                timeout=10,
-            )
-            response.raise_for_status()
-            return True
-        except requests.exceptions.RequestException as exc:
-            log.warning("Could not update live usage report: %s", exc)
-            return False
+    return _post_report(
+        current - _SECONDS_PER_DAY,
+        current,
+        "Salena OpenAI usage — latest completed response",
+    )
 
 
 def request_usage_report_update():
-    """Refresh after each model response without blocking the support reply."""
+    """Post after a completed support response without blocking the reply."""
     global _UPDATE_THREAD, _UPDATE_VERSION
     if not os.getenv("DAILY_USAGE_WEBHOOK_URL", "").strip():
         return
@@ -309,7 +298,7 @@ def request_usage_report_update():
 
 
 def _live_update_loop():
-    """Coalesce a burst of model calls, then ensure the latest count is shown."""
+    """Coalesce completion signals into one new report message per response."""
     global _UPDATE_VERSION
     while not _STOP.is_set():
         # A short coalescing window avoids one webhook edit per internal router,
@@ -319,7 +308,7 @@ def _live_update_loop():
             return
         with _UPDATE_LOCK:
             before = _UPDATE_VERSION
-        update_current_report()
+        send_usage_snapshot()
         with _UPDATE_LOCK:
             if _UPDATE_VERSION == before:
                 return
@@ -339,12 +328,8 @@ def start_daily_usage_reporter():
 
 
 def _report_loop():
-    if not send_due_report():
-        # Migrate a report created by older code, which did not retain the
-        # Discord message ID required for edits, into one editable live report.
-        update_current_report()
+    send_due_report()
     # Polling makes a failed webhook edit retry on the next five-minute
     # interval, without claiming a successful update in the persistent state.
     while not _STOP.wait(300):
-        if not send_due_report():
-            update_current_report()
+        send_due_report()

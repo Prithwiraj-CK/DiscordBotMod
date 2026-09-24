@@ -55,22 +55,20 @@ class UsageReportingTests(unittest.TestCase):
         self.assertNotIn("prompt", event)
         self.assertNotIn("output", event)
 
-    @patch("usage_reporting.requests.patch")
     @patch("usage_reporting.requests.post")
-    def test_creates_then_updates_one_report_message(self, post, patch_request):
+    def test_posts_a_new_snapshot_instead_of_editing_an_old_message(self, post):
         post.return_value.raise_for_status.return_value = None
         post.return_value.json.return_value = {"id": "usage-message"}
-        patch_request.return_value.raise_for_status.return_value = None
         usage_reporting.record_usage("gpt-6-luna", _Usage(), now=102)
         self.assertTrue(usage_reporting.send_due_report(now=100 + 86400))
-        self.assertTrue(usage_reporting.update_current_report(now=100 + 86401))
+        self.assertTrue(usage_reporting.send_usage_snapshot(now=100 + 86401))
         self.assertFalse(usage_reporting.send_due_report(now=100 + 86401))
         content = post.call_args.kwargs["json"]["content"]
         self.assertIn("Estimated cost: **$0.000379**", content)
         self.assertIn("Read: 1,000 input tokens", content)
         self.assertIn("Wrote: 600 output tokens (400 reasoning)", content)
-        self.assertIn("/messages/usage-message", patch_request.call_args.args[0])
-        self.assertIn("Calls: 1", patch_request.call_args.kwargs["json"]["content"])
+        self.assertIn("latest completed response", content)
+        self.assertEqual(2, post.call_count)
 
 
 if __name__ == "__main__":
