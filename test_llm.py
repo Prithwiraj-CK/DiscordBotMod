@@ -60,6 +60,31 @@ class LlmTests(unittest.TestCase):
         self.assertIn(tool_call, second_input)
         self.assertTrue(any(item.get("type") == "function_call_output" for item in second_input if isinstance(item, dict)))
 
+    def test_tool_loop_finalizes_when_research_budget_is_used(self):
+        first_call = SimpleNamespace(type="function_call", name="search_repository", call_id="call_1", arguments="{}")
+        second_call = SimpleNamespace(type="function_call", name="search_repository", call_id="call_2", arguments="{}")
+        responses = Mock()
+        responses.create.side_effect = [
+            SimpleNamespace(output=[first_call], output_text="", usage=None),
+            SimpleNamespace(output=[second_call], output_text="", usage=None),
+            SimpleNamespace(output=[], output_text='{"answer":"researched"}', usage=None),
+        ]
+        client = SimpleNamespace(responses=responses)
+        schema = {
+            "type": "object", "properties": {"answer": {"type": "string"}},
+            "required": ["answer"], "additionalProperties": False,
+        }
+        with patch("llm._get_client", return_value=client):
+            value = llm.ask_json_with_tools(
+                "research", [{"role": "user", "content": "question"}], schema,
+                [{"type": "function", "name": "search_repository", "parameters": {"type": "object"}}],
+                lambda name, arguments: {"results": []}, max_tool_rounds=1,
+            )
+
+        self.assertEqual({"answer": "researched"}, value)
+        self.assertEqual(3, responses.create.call_count)
+        self.assertNotIn("tools", responses.create.call_args.kwargs)
+
 
 if __name__ == "__main__":
     unittest.main()

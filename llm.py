@@ -387,12 +387,9 @@ def ask_json_with_tools(system_prompt, messages, schema, tools, tool_executor,
             log.info("Tool research completed after %s tool round(s)", round_number)
             return value
 
-        if round_number >= rounds:
-            raise LLMUnavailable("Research tool budget was exhausted before Luna produced an answer")
-
         log.info(
             "Tool research round %s/%s: %s",
-            round_number + 1, rounds,
+            min(round_number + 1, rounds), rounds,
             ", ".join(str(getattr(call, "name", "unknown")) for call in function_calls),
         )
 
@@ -414,6 +411,41 @@ def ask_json_with_tools(system_prompt, messages, schema, tools, tool_executor,
                 "call_id": str(getattr(call, "call_id", "")),
                 "output": json.dumps(result, ensure_ascii=False),
             })
+
+        if round_number >= rounds:
+            # The model has completed the allowed research budget. Its final
+            # request intentionally has no tools, so it must synthesize the
+            # evidence it already gathered rather than turn a well-researched
+            # support question into a generic handoff.
+            try:
+                final_response = _get_client().responses.create(
+                    model=model,
+                    instructions=(
+                        system_prompt
+                        + "\n\nThe research budget is complete. Use the collected tool results "
+                        "to return the final JSON answer now; do not request another tool."
+                    ),
+                    input=input_items,
+                    max_output_tokens=_json_max_output_tokens(),
+                    reasoning={"effort": _reasoning_effort()},
+                    text={"format": text_format},
+                    store=False,
+                )
+                _record_response_usage(final_response, model)
+                content = (final_response.output_text or "").strip()
+                value = json.loads(content)
+                if not isinstance(value, dict):
+                    raise ValueError("final JSON was not an object")
+                log.info("Tool research reached its budget and finalized from collected evidence")
+                return value
+            except (ValueError, TypeError) as exc:
+                raise LLMUnavailable("Research budget finalization returned invalid JSON") from exc
+            except openai.AuthenticationError as exc:
+                raise LLMUnavailable("OpenAI rejected the API key: {}".format(exc)) from exc
+            except openai.BadRequestError as exc:
+                raise LLMUnavailable("OpenAI rejected research finalization: {}".format(exc)) from exc
+            except _RETRYABLE as exc:
+                raise LLMUnavailable("OpenAI could not finalize completed research: {}".format(exc)) from exc
 
     raise LLMUnavailable(
         "Tool research unavailable: {}".format(last_error or "research loop did not finish")
