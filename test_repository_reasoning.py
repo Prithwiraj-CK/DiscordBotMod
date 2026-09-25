@@ -4,10 +4,14 @@ import unittest
 from unittest.mock import patch
 
 from bot import (
-    _historical_product_hint, _known_safe_answer, _repository_products,
-    _staff_evidence_answer, _staff_history_evidence, _valhalla_capacity_answer,
+    _historical_product_hint, _known_safe_answer, _luna_conversation_window,
+    _repository_products, _requires_account_handoff, _staff_evidence_answer,
+    _staff_history_evidence, _valhalla_capacity_answer, autonomous_decision,
 )
-from codebase_search import _priority_token_queries, _semantic_file_anchors, _workflow_queries
+from codebase_search import (
+    _priority_token_queries, _section_bounds, _semantic_file_anchors,
+    _workflow_queries,
+)
 from knowledge import retrieve_facts
 
 
@@ -18,10 +22,67 @@ QUESTION = (
 
 
 class RepositoryReasoningTests(unittest.TestCase):
+    def test_luna_window_keeps_five_prior_user_messages(self):
+        turns = []
+        for index in range(7):
+            turns.append({"role": "user", "content": "user message {}".format(index)})
+            turns.append({"role": "assistant", "content": "answer {}".format(index)})
+        turns.append({"role": "user", "content": "current question"})
+
+        window = _luna_conversation_window(turns, max_turns=4)
+
+        user_messages = [turn["content"] for turn in window if turn["role"] == "user"]
+        self.assertEqual("current question", user_messages[-1])
+        self.assertGreaterEqual(len(user_messages[:-1]), 5)
+
+    def test_luna_window_prefers_the_current_user_over_channel_bystanders(self):
+        turns = [
+            {"role": "user", "content": "Billi: my earlier question {}".format(index)}
+            for index in range(6)
+        ]
+        turns.extend(
+            {"role": "user", "content": "Other{}: unrelated chat".format(index)}
+            for index in range(6)
+        )
+        turns.append({"role": "user", "content": "Billi: current question"})
+
+        window = _luna_conversation_window(turns, max_turns=4)
+        billi_messages = [
+            turn for turn in window
+            if turn["role"] == "user" and turn["content"].startswith("Billi:")
+        ]
+        self.assertGreaterEqual(len(billi_messages[:-1]), 5)
+
+    def test_hypothetical_low_balance_behavior_is_not_an_account_handoff(self):
+        self.assertFalse(_requires_account_handoff(QUESTION))
+        self.assertTrue(_requires_account_handoff("My Valhalla balance is missing, can you check it?"))
+
     def test_capacity_question_expands_to_execution_anchors(self):
         queries = _workflow_queries(QUESTION)
         self.assertIn("verifyUserWalletConditions", queries)
         self.assertIn("retryOpenPositionJob", queries)
+
+    def test_leader_follower_order_expands_to_watcher_anchors(self):
+        queries = _workflow_queries(
+            "Can the copying wallet open before the lead wallet enters the pool?"
+        )
+        self.assertIn("processUserForCopyTrade", queries)
+        self.assertIn("copyTradeQueue.add", queries)
+
+    def test_multiline_typescript_method_reads_the_complete_scope(self):
+        lines = [
+            "class Watcher {",
+            "  private async processTransaction(",
+            "    signature: string,",
+            "    wallet: string,",
+            "  ): Promise<void> {",
+            "    if (wallet) {",
+            "      await this.enqueue(signature);",
+            "    }",
+            "  }",
+            "}",
+        ]
+        self.assertEqual((2, 9), _section_bounds(lines, 7, ".ts"))
 
     def test_repository_search_prioritises_specific_address_roles(self):
         queries = _priority_token_queries(
@@ -165,6 +226,103 @@ class RepositoryReasoningTests(unittest.TestCase):
     def test_repository_research_checks_both_fixed_roots(self):
         self.assertEqual(("olympus", "valhalla"), _repository_products("olympus", "redeemed"))
         self.assertEqual(("valhalla", "olympus"), _repository_products("valhalla", "copy ratio"))
+
+    @patch("bot._review_evidence")
+    @patch("bot._plan_searches", return_value=[])
+    @patch("bot.retrieve_history")
+    @patch("bot.retrieve_notes", return_value=[])
+    @patch("bot.retrieve_facts", return_value=[])
+    @patch("bot.read_codebase_section")
+    @patch("bot.search_codebase")
+    @patch("bot.ask_json")
+    @patch("bot.CODEBASE_SEARCH_ENABLED", True)
+    @patch("bot.APPROVED_FACTS_ENABLED", False)
+    @patch("bot.REPOSITORY_SEARCH_BOTH", True)
+    def test_luna_pipeline_does_not_post_a_loose_staff_reply(
+        self,
+        mocked_ask,
+        mocked_search,
+        mocked_read,
+        mocked_facts,
+        mocked_notes,
+        mocked_history,
+        mocked_plan,
+        mocked_review,
+    ):
+        del mocked_facts, mocked_notes, mocked_plan
+        question = (
+            "Does the lead wallet need to enter the pool before the copying "
+            "wallet opens its position?"
+        )
+        source = {
+            "id": "codebase.valhalla.copy-order",
+            "source_type": "codebase_section",
+            "product": "valhalla",
+            "source": "copy-trade-transaction-watcher.ts:260-620",
+            "path": "src/scripts/copy-trade/copy-trade-transaction-watcher.ts",
+            "line": 260,
+            "fact": (
+                "The watcher observes and resolves the target wallet transaction first, "
+                "then processUserForCopyTrade enqueues each follower's copy job."
+            ),
+        }
+        mocked_search.side_effect = lambda query, product, limit=28: [source] if product == "valhalla" else []
+        mocked_read.return_value = source
+        mocked_history.return_value = [{
+            "id": "bad-old-answer",
+            "is_staff": True,
+            "channel_name": "general",
+            "question_context": "copy wallet pool lead wallet",
+            "content": "close that position, doesnt stop copying the wallet",
+        }]
+        mocked_review.return_value = {
+            "needs_more_search": False,
+            "follow_up_searches": [],
+            "read_evidence_ids": [],
+            "read_files": [],
+        }
+
+        def model_result(system_prompt, messages, schema, name="structured_response", temperature=0.2):
+            del system_prompt, messages, schema, temperature
+            if name == "support_luna_validation":
+                return {
+                    "supported": True,
+                    "answers_question": True,
+                    "wrong_product_or_feature": False,
+                    "incorrect_arithmetic": False,
+                    "unnecessary_clarification": False,
+                    "unsupported_claims": [],
+                    "forbidden_claims": [],
+                }
+            self.assertEqual("support_luna_final", name)
+            answer = (
+                "The lead wallet transaction is processed first. Valhalla then "
+                "queues the copying wallet's position from that observed event."
+            )
+            return {
+                "action": "answer",
+                "evidence_ids": [source["id"]],
+                "claim_evidence": [{"claim": answer, "evidence_ids": [source["id"]]}],
+                "missing_information": [],
+                "draft_answer": answer,
+            }
+
+        mocked_ask.side_effect = model_result
+        turns = [
+            {"role": "user", "content": "Billi: older question {}".format(index)}
+            for index in range(5)
+        ] + [{"role": "user", "content": "Billi: " + question}]
+
+        result = autonomous_decision(question, turns, force_reply=True)
+
+        self.assertEqual("answer", result["action"])
+        self.assertIn("processed first", result["draft_answer"])
+        self.assertNotIn("close that position", result["draft_answer"])
+        final_prompt = next(
+            call.args[0] for call in mocked_ask.call_args_list
+            if call.kwargs.get("name") == "support_luna_final"
+        )
+        self.assertIn("never evidence", final_prompt.lower())
 
 
 if __name__ == "__main__":

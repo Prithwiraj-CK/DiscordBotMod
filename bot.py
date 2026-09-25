@@ -49,7 +49,7 @@ from discum.gateway.gateway import (
 
 from alerts import alert
 from codebase_search import (
-    codebase_prompt, read_codebase_context, read_codebase_file,
+    _workflow_queries, codebase_prompt, read_codebase_context, read_codebase_file,
     read_codebase_section, search_codebase,
 )
 from conversation_memory import ConversationMemory
@@ -131,7 +131,11 @@ def _parse_channel_ids(raw):
 
 TOKEN = os.getenv("DISCORD_USER_TOKEN", "").strip()
 STAFF_ROLE_ID = os.getenv("STAFF_ROLE_ID", "").strip()
-CONTEXT_MESSAGES = _env_int("CONTEXT_MESSAGES", 8)
+# Redis is the primary same-user memory, but Discord history is the fallback
+# when Redis is unavailable or has just restarted. Fetch enough messages to
+# preserve at least five prior user turns even when Salena's replies are
+# interleaved with them.
+CONTEXT_MESSAGES = max(12, _env_int("CONTEXT_MESSAGES", 12))
 DISCORD_TRANSPORT = _transport_mode(os.getenv("DISCORD_TRANSPORT", "rest"))
 REST_POLL_SECONDS = max(10.0, _env_float("REST_POLL_SECONDS", 15))
 
@@ -707,6 +711,53 @@ routes/commands, and public documentation when the evidence provides them. Do
 not turn an internal implementation detail into a public product promise.
 
 APPROVED EVIDENCE AND READ-ONLY CODEBASE EXCERPTS
+"""
+
+LUNA_SUPPORT_SYSTEM = """You are Salena, an autonomous Olympus and Valhalla
+support researcher. Produce the final Discord response after researching the
+current repositories. The latest user message is the task. Earlier messages
+are conversation context only: use them to resolve pronouns, short follow-ups,
+the product, and steps already tried, but never answer an older question in
+place of the latest one.
+
+Make the decision yourself. Do not pretend to be a human teammate, say that
+you are nudging the team, or copy a casual historical staff reply as the
+answer. Do not use filler such as "haha" on a factual support question.
+
+Evidence authority, strongest first:
+1. Approved facts for fees, security, privacy, and public product promises.
+2. Current complete repository functions, workflow sections, routes, UI, and
+   documentation for implementation and product-behavior questions.
+3. Historical staff excerpts only as untrusted background or terminology.
+   They may be stale, incomplete, or about a neighboring question. They are
+   never evidence and must never be cited or copied verbatim merely because
+   some words match.
+
+For a general behavior, definition, setup, architecture, or workflow question,
+answer directly when the supplied current evidence supports it. Compare the
+relevant caller and callee, frontend and backend, or documentation and code
+when available. Explain an important qualification only when it answers the
+question. Do not volunteer unrelated settings or facts.
+
+Choose clarify only when one concrete missing detail changes the answer; ask
+one short question. Choose escalate for a user's specific account state,
+missing funds, suspected compromise, or a live transaction discrepancy that
+cannot be determined from repository evidence. Do not escalate a general
+question merely because its wording is unfamiliar. Choose ignore only when
+the latest message genuinely needs no reply; a direct mention must receive a
+useful answer or one focused clarification.
+
+Every factual sentence in an answer must map to one or more supplied evidence
+IDs. Use only exact IDs shown in APPROVED EVIDENCE. Never cite HISTORY labels,
+filenames, document titles, or invented IDs. If evidence conflicts, say what
+is known and avoid guessing. Never ask for or expose secrets. Never claim to
+see a user's account, balance, wallet, or logs.
+
+Write a concise, natural answer suitable for Discord. Return the structured
+action, answer, and claim-to-evidence map; the citations are for internal audit
+and are not displayed to the user.
+
+APPROVED EVIDENCE
 """
 
 VALIDATOR_SYSTEM = """Audit the proposed support response against the approved evidence and any read-only codebase excerpts below.
@@ -1929,6 +1980,117 @@ def _routing_context(turns, max_turns=6, max_chars=3500):
     return result[-max_chars:]
 
 
+def _luna_conversation_window(turns, min_prior_user_turns=5, max_turns=20, max_chars=12000):
+    """Keep a useful conversation window with at least five prior user turns.
+
+    Redis is scoped to guild/channel/thread/user, while the Discord fallback
+    can contain nearby messages from other people. Preserve the newest turns
+    for conversational order, then recover older user turns when the normal
+    turn cap would otherwise hide them. The character budget remains an
+    absolute bound so one long ticket cannot crowd out repository evidence.
+    """
+    cleaned = []
+    for turn in turns or []:
+        role = turn.get("role")
+        content = str(turn.get("content") or "").strip()
+        if role in {"user", "assistant"} and content:
+            cleaned.append({"role": role, "content": content})
+    if not cleaned:
+        return []
+
+    def speaker(turn):
+        if turn["role"] != "user":
+            return ""
+        match = re.match(r"^([^:\n]{1,80}):\s", turn["content"])
+        return match.group(1).strip().casefold() if match else ""
+
+    current_speaker = speaker(cleaned[-1])
+
+    def is_current_user(turn):
+        if turn["role"] != "user":
+            return False
+        return not current_speaker or speaker(turn) == current_speaker
+
+    latest = cleaned[-max_turns:]
+    selected_indexes = set(range(max(0, len(cleaned) - max_turns), len(cleaned)))
+    required_user_turns = min_prior_user_turns + (
+        1 if cleaned[-1]["role"] == "user" else 0
+    )
+    user_count = sum(1 for turn in latest if is_current_user(turn))
+    if user_count < required_user_turns:
+        for index in range(max(0, len(cleaned) - max_turns) - 1, -1, -1):
+            if not is_current_user(cleaned[index]):
+                continue
+            selected_indexes.add(index)
+            user_count += 1
+            if user_count >= required_user_turns:
+                break
+
+    selected = [cleaned[index] for index in sorted(selected_indexes)]
+    budget = max(2000, int(max_chars))
+    while len(selected) > 1 and sum(len(turn["content"]) for turn in selected) > budget:
+        # Preserve the latest message and, where possible, the five newest
+        # user turns. Drop the oldest assistant turn before user context.
+        protected_user_indexes = {
+            index for index, turn in list(enumerate(selected))[::-1]
+            if is_current_user(turn)
+        }
+        protected_user_indexes = set(sorted(protected_user_indexes)[-required_user_turns:])
+        drop_at = next(
+            (
+                index for index, turn in enumerate(selected[:-1])
+                if turn["role"] == "assistant" and index not in protected_user_indexes
+            ),
+            None,
+        )
+        if drop_at is None:
+            drop_at = next(
+                (index for index in range(len(selected) - 1) if index not in protected_user_indexes),
+                None,
+            )
+        if drop_at is None:
+            truncatable = [
+                index for index in sorted(protected_user_indexes)
+                if index < len(selected) - 1 and len(selected[index]["content"]) > 400
+            ]
+            if not truncatable:
+                break
+            index = truncatable[0]
+            overflow = sum(len(turn["content"]) for turn in selected) - budget
+            keep = max(400, len(selected[index]["content"]) - overflow)
+            selected[index]["content"] = selected[index]["content"][-keep:]
+            continue
+        selected.pop(drop_at)
+    return selected
+
+
+def _requires_account_handoff(query):
+    """Separate live account incidents from answerable behavior questions."""
+    text = str(query or "")
+    if _SECURITY_RE.search(text) and not _SAFE_SETUP_SECURITY_RE.search(text):
+        return True
+
+    # A hypothetical capacity question often says "my balance is too low",
+    # but asks what the implementation does. That is repository-answerable;
+    # it is not a request to inspect the user's live balance or transaction.
+    general_capacity = bool(
+        _VALHALLA_CAPACITY_QUESTION_RE.search(text)
+        and re.search(r"\b(?:if|does|would|what happens|skip|lower|smaller)\b", text, re.IGNORECASE)
+        and not re.search(
+            r"\b(?:missing|stuck|failed|wrong|check my|inspect my|where (?:is|are|did))\b",
+            text,
+            re.IGNORECASE,
+        )
+    )
+    if _MUST_ESCALATE_RE.search(text) and not general_capacity:
+        return True
+
+    return bool(
+        _DISCREPANCY_RE.search(text)
+        and re.search(r"\b(?:my|mine|specific|this (?:trade|order|transaction)|check|inspect)\b", text, re.IGNORECASE)
+    )
+
+
 def _is_short_follow_up(query):
     """Whether a message depends on the immediately preceding exchange."""
     words = re.findall(r"[A-Za-z0-9_/.-]+", str(query or ""))
@@ -2365,8 +2527,13 @@ def _repair_invalid_citations(draft, draft_action, facts, invalid_ids):
     return repaired
 
 
-def autonomous_decision(query, turns, product_hint=None, force_reply=False):
-    """Return the autonomous routing decision and its validation metadata."""
+def _legacy_autonomous_decision(query, turns, product_hint=None, force_reply=False):
+    """Former multi-stage pipeline retained temporarily for regression reference.
+
+    The live path below no longer calls this function. Its independent router,
+    deterministic answer overrides, and raw staff fallback could overrule the
+    repository research and caused unrelated replies to be posted.
+    """
     # Small talk is deterministic and does not need product retrieval. Keeping
     # it ahead of the model also makes a bad classifier impossible to turn a
     # greeting into a product answer.
@@ -3086,6 +3253,418 @@ def autonomous_decision(query, turns, product_hint=None, force_reply=False):
     }
 
 
+def _decision(action, product, intent, answer, evidence_ids=None,
+              missing_information=None, unsupported_claims=None, confidence=None):
+    """Return one consistent decision shape for the Luna-led live path."""
+    if confidence is None:
+        confidence = 0.9 if action == "answer" else 0.65
+    return {
+        "action": action,
+        "product": product,
+        "intent": intent,
+        "risk": "critical" if action == "escalate" else "low",
+        "confidence": confidence,
+        "evidence_ids": sorted({str(value) for value in (evidence_ids or []) if value}),
+        "missing_information": list(missing_information or []),
+        "draft_answer": answer,
+        "unsupported_claims": list(unsupported_claims or []),
+    }
+
+
+def _validate_luna_draft(query, product, feature, facts, draft, turns, calculation=None):
+    """Audit once and give Luna one evidence-bounded correction opportunity."""
+    answer = str(draft.get("draft_answer") or "").strip()
+    if not facts or not answer or draft.get("action") not in {"answer", "clarify"}:
+        return draft, []
+
+    claim_map = "\n".join(
+        "- {} -> {}".format(item["claim"], ", ".join(item["evidence_ids"]) or "none")
+        for item in draft.get("claim_evidence", [])
+    ) or "(none)"
+    validation = ask_json(
+        VALIDATOR_SYSTEM + _evidence_text(facts) + "\n\nCLAIM-TO-EVIDENCE MAP:\n" + claim_map,
+        [{"role": "user", "content": (
+            "QUESTION: {}\nPRODUCT: {}\nFEATURE: {}\nCALCULATION: {}\n\nDRAFT RESPONSE:\n{}"
+        ).format(
+            query,
+            product,
+            feature,
+            json.dumps(calculation, sort_keys=True) if calculation else "none",
+            answer,
+        )}],
+        VALIDATION_SCHEMA,
+        name="support_luna_validation",
+        temperature=0.0,
+    )
+    failures = []
+    failures.extend(str(value) for value in validation.get("unsupported_claims", []))
+    failures.extend(str(value) for value in validation.get("forbidden_claims", []))
+    if validation.get("answers_question") is not True:
+        failures.append("The response did not answer the latest question.")
+    if validation.get("wrong_product_or_feature") is True:
+        failures.append("The response used the wrong product or feature.")
+    if validation.get("incorrect_arithmetic") is True:
+        failures.append("The response's arithmetic was incorrect.")
+    if validation.get("unnecessary_clarification") is True:
+        failures.append("The response asked for information already present in context.")
+    if validation.get("supported") is not True and not failures:
+        failures.append("At least one factual claim was not supported by supplied evidence.")
+    if not failures:
+        return draft, []
+
+    correction_prompt = LUNA_SUPPORT_SYSTEM + _evidence_text(facts)
+    correction_prompt += (
+        "\n\nVALIDATION CORRECTION\n"
+        "Correct the draft using only the supplied evidence. Answer the latest question, "
+        "keep the correct product, remove unsupported claims, and cite exact evidence IDs. "
+        "Do not replace an answerable general repository question with a handoff.\n"
+        "Problems found: {}\n\nDRAFT TO CORRECT:\n{}"
+    ).format("; ".join(dict.fromkeys(failures)), answer)
+    try:
+        corrected = ask_json(
+            correction_prompt,
+            turns,
+            DRAFT_SCHEMA,
+            name="support_luna_validation_correction",
+            temperature=0.0,
+        )
+    except Exception as exc:
+        log.warning("Luna validation correction unavailable: %s", exc)
+        return draft, failures
+    return corrected, failures
+
+
+def autonomous_decision(query, turns, product_hint=None, force_reply=False):
+    """Research both current repositories, then let Luna make one final decision.
+
+    The former live pipeline had several independent decision makers. A route
+    classifier, deterministic FAQ overrides, and a raw historical-staff
+    fallback could all replace the result of repository research. This path
+    keeps retrieval bounded and safe, but Luna alone selects and writes the
+    final response from the completed evidence packet.
+    """
+    if force_reply and _is_social_smalltalk(query):
+        return _decision(
+            "answer", product_hint or "generic", "social", _social_reply(query),
+            confidence=1.0,
+        )
+
+    context_turns = _luna_conversation_window(turns)
+    resolved_query = _resolve_follow_up_question(query, context_turns)
+    detection = detect_product_feature(resolved_query, prior_product=product_hint)
+    extracted_question = extract_question(resolved_query, detection)
+    calculation = calculate_support_values(extracted_question)
+
+    detected_product = detection.get("product")
+    product = (
+        product_hint
+        if product_hint in {"valhalla", "olympus"}
+        else detected_product
+        if detected_product in {"valhalla", "olympus"}
+        else _context_product_hint(resolved_query, context_turns)
+    )
+    if product not in {"valhalla", "olympus"}:
+        product = _historical_product_hint(resolved_query) or "unknown"
+    ranking_detection = dict(detection)
+    if product in {"valhalla", "olympus"}:
+        ranking_detection["product"] = product
+    intent = _intent_hint(resolved_query) or extracted_question.get("intent") or "unknown"
+    if intent == "configure_settings":
+        intent = "settings"
+
+    log.info(
+        "Luna support research product=%s feature=%s intent=%s context_turns=%s user_turns=%s",
+        product,
+        detection.get("feature"),
+        intent,
+        len(context_turns),
+        sum(1 for turn in context_turns[:-1] if turn.get("role") == "user"),
+    )
+
+    if _requires_account_handoff(query):
+        return _decision("escalate", product, intent, ESCALATE, confidence=1.0)
+
+    # Context helps the search planner resolve short follow-ups, but the
+    # current question remains first so an earlier topic cannot take over.
+    prior_user_context = [
+        str(turn.get("content") or "").strip()
+        for turn in context_turns[:-1]
+        if turn.get("role") == "user" and str(turn.get("content") or "").strip()
+    ][-5:]
+    research_query = resolved_query
+    if prior_user_context:
+        research_query += "\n\nRecent same-conversation user context:\n" + "\n".join(
+            "- {}".format(value[:600]) for value in prior_user_context
+        )
+    if detection.get("exact_labels"):
+        research_query = "Exact interface labels: {}\n{}".format(
+            ", ".join(detection["exact_labels"]), research_query,
+        )
+
+    searches = [(research_query, product, intent)]
+    for planned in _plan_searches(research_query, product, intent)[:2]:
+        if planned not in searches:
+            searches.append(planned)
+
+    facts_by_id = OrderedDict()
+    codebase_by_id = OrderedDict()
+    notes_by_key = OrderedDict()
+    history_by_id = OrderedDict()
+
+    def collect_search(search_query, search_product, search_intent):
+        if APPROVED_FACTS_ENABLED:
+            for fact in retrieve_facts(
+                search_query, product=search_product, intent=search_intent, limit=12,
+            ):
+                evidence_id = str(fact.get("id") or "")
+                if evidence_id:
+                    facts_by_id[evidence_id] = fact
+
+        if CODEBASE_SEARCH_ENABLED and _should_search_codebase(search_query, search_intent):
+            for repository_product in _repository_products(search_product, search_query):
+                raw_hits = search_codebase(search_query, repository_product, limit=28)
+                for excerpt in raw_hits:
+                    evidence_id = str(excerpt.get("id") or "")
+                    if evidence_id:
+                        codebase_by_id[evidence_id] = excerpt
+
+                # Read complete functions/workflow sections for the strongest
+                # hits instead of asking Luna to infer behavior from one line.
+                ranked_hits = rank_evidence(raw_hits, search_query, ranking_detection, limit=7)
+                exact_hits = [
+                    item for item in raw_hits
+                    if item.get("source_type") == "codebase"
+                ][:5]
+                symbol_hits = [
+                    item for item in raw_hits
+                    if item.get("source_type") == "codebase"
+                    and re.search(
+                        r"\b(?:def|class|function|interface|private|public|protected|async)\b|"
+                        r"\b(?:const|let|var)\s+[A-Za-z_$][\w$]*\s*=",
+                        str(item.get("fact") or ""),
+                    )
+                ][:5]
+                workflow_terms = [
+                    term.casefold() for term in _workflow_queries(search_query)
+                ]
+                workflow_hits = [
+                    item for item in raw_hits
+                    if item.get("source_type") == "codebase"
+                    and any(
+                        term in "{} {}".format(
+                            item.get("path") or "", item.get("fact") or "",
+                        ).casefold()
+                        for term in workflow_terms
+                    )
+                ][:8]
+                section_candidates = []
+                seen_candidates = set()
+                for item in ranked_hits + workflow_hits + symbol_hits + exact_hits:
+                    marker = str(item.get("id") or "")
+                    if not marker or marker in seen_candidates:
+                        continue
+                    seen_candidates.add(marker)
+                    section_candidates.append(item)
+                for excerpt in section_candidates:
+                    path = str(excerpt.get("path") or "")
+                    if not path:
+                        continue
+                    section = read_codebase_section(
+                        repository_product, path, excerpt.get("line", 1),
+                    )
+                    if not section:
+                        section = read_codebase_context(
+                            repository_product, path, excerpt.get("line", 1), radius=8,
+                        )
+                    if section:
+                        evidence_id = str(section.get("id") or "")
+                        if evidence_id:
+                            codebase_by_id[evidence_id] = section
+
+        for note in retrieve_notes(search_query, product=search_product, limit=8):
+            notes_by_key[(str(note.get("source") or ""), str(note.get("text") or ""))] = note
+        for excerpt in retrieve_history(search_query, product=search_product, limit=8):
+            message_id = str(excerpt.get("id") or "")
+            if message_id:
+                history_by_id[message_id] = excerpt
+
+    for search_query, search_product, search_intent in searches:
+        collect_search(search_query, search_product, search_intent)
+
+    # Keep the proven capacity workflow as a generic evidence collector only;
+    # Luna still reads it and writes the answer like every other question.
+    if CODEBASE_SEARCH_ENABLED:
+        _collect_valhalla_capacity_evidence(resolved_query, product, codebase_by_id)
+
+    # One research-review pass may follow references or search a missing
+    # synonym. It cannot answer, route, or inject a staff reply.
+    preliminary = rank_evidence(
+        list(facts_by_id.values()) + list(codebase_by_id.values()),
+        research_query,
+        ranking_detection,
+        limit=14,
+    )
+    if CODEBASE_SEARCH_ENABLED and codebase_by_id and intent not in {"social", "addressed_to_staff"}:
+        review = _review_evidence(
+            resolved_query,
+            product,
+            intent,
+            preliminary,
+            list(codebase_by_id.values()),
+            list(notes_by_key.values())[:8],
+        )
+        for follow_query, follow_product, follow_intent in review["follow_up_searches"][:2]:
+            collect_search(follow_query, follow_product, follow_intent)
+        for evidence_id in review["read_evidence_ids"]:
+            excerpt = codebase_by_id.get(evidence_id)
+            if not excerpt or not excerpt.get("path"):
+                continue
+            section = read_codebase_section(
+                excerpt.get("product"), excerpt.get("path"), excerpt.get("line", 1),
+            )
+            if section:
+                codebase_by_id[str(section.get("id") or evidence_id)] = section
+        for request in review["read_files"]:
+            excerpt = read_codebase_file(
+                request["product"], request["path"],
+                request["start_line"], request["end_line"],
+            )
+            if excerpt:
+                codebase_by_id[str(excerpt.get("id") or request["path"])] = excerpt
+
+    facts = rank_evidence(
+        list(facts_by_id.values()) + list(codebase_by_id.values()),
+        research_query,
+        ranking_detection,
+        limit=16,
+    )
+    fact_ids = {str(fact.get("id") or "") for fact in facts if fact.get("id")}
+    notes = list(notes_by_key.values())[:6]
+    history = list(history_by_id.values())[:6]
+    log.info(
+        "Luna completed research repositories=%s evidence=%s notes=%s history=%s",
+        _repository_products(product, research_query),
+        [(item.get("source"), item.get("_rank")) for item in facts],
+        len(notes),
+        len(history),
+    )
+
+    prompt = LUNA_SUPPORT_SYSTEM + _evidence_text(facts)
+    prompt += (
+        "\n\nCURRENT QUESTION\n{}"
+        + "\n\nRESOLVED QUESTION FOR FOLLOW-UP CONTEXT\n{}"
+        + "\n\nRESEARCH METADATA\nproduct={} feature={} intent={} calculation={}"
+    ).format(
+        query,
+        resolved_query,
+        product,
+        detection.get("feature") or "unknown",
+        intent,
+        json.dumps(calculation, sort_keys=True) if calculation else "none",
+    )
+    if notes:
+        prompt += "\n\n" + notes_prompt(notes)
+    if history:
+        prompt += "\n\n" + history_prompt(history)
+
+    draft = ask_json(
+        prompt,
+        context_turns,
+        DRAFT_SCHEMA,
+        name="support_luna_final",
+        temperature=0.0,
+    )
+    action = draft.get("action")
+    if force_reply and action == "ignore":
+        action = "clarify"
+        draft["action"] = action
+        draft["draft_answer"] = "What would you like help with?"
+        draft["evidence_ids"] = []
+        draft["claim_evidence"] = []
+    if action not in {"answer", "clarify", "escalate", "ignore"}:
+        return _decision(
+            "escalate", product, intent, ESCALATE,
+            unsupported_claims=["invalid final action"], confidence=0.0,
+        )
+
+    used_ids = _normalise_draft_evidence(draft)
+    if not used_ids.issubset(fact_ids):
+        repaired = _repair_invalid_citations(draft, action, facts, used_ids - fact_ids)
+        if repaired is not None:
+            draft = repaired
+            used_ids = _normalise_draft_evidence(draft)
+
+    # Answers with factual content must cite the completed research packet.
+    if action == "answer" and (not used_ids or not used_ids.issubset(fact_ids)):
+        log.warning("Luna final answer had missing/invalid evidence: %s", sorted(used_ids - fact_ids))
+        correction_prompt = (
+            LUNA_SUPPORT_SYSTEM
+            + _evidence_text(facts)
+            + "\n\nCITATION AND GROUNDING CORRECTION\n"
+            "Answer the latest question from the evidence. Cite exact supplied IDs for every "
+            "factual claim. Do not use historical text as evidence and do not hand off an "
+            "answerable general repository question."
+        )
+        draft = ask_json(
+            correction_prompt,
+            context_turns,
+            DRAFT_SCHEMA,
+            name="support_luna_grounding_correction",
+            temperature=0.0,
+        )
+        action = draft.get("action")
+        used_ids = _normalise_draft_evidence(draft)
+
+    if action in {"answer", "clarify"} and used_ids.issubset(fact_ids):
+        draft, validation_failures = _validate_luna_draft(
+            query,
+            product,
+            detection.get("feature"),
+            facts,
+            draft,
+            context_turns,
+            calculation=calculation,
+        )
+        action = draft.get("action")
+        used_ids = _normalise_draft_evidence(draft)
+        if validation_failures:
+            log.info("Luna corrected final draft after validation: %s", validation_failures)
+
+    answer = str(draft.get("draft_answer") or "").strip()
+    if action == "ignore":
+        return _decision("ignore", product, intent, IGNORE, confidence=0.8)
+    if action == "escalate":
+        return _decision("escalate", product, intent, ESCALATE, evidence_ids=used_ids)
+    if action not in {"answer", "clarify"} or not answer:
+        return _decision(
+            "escalate", product, intent, ESCALATE,
+            evidence_ids=used_ids,
+            unsupported_claims=["empty or invalid final draft"],
+            confidence=0.0,
+        )
+    if not used_ids.issubset(fact_ids):
+        return _decision(
+            "escalate", product, intent, ESCALATE,
+            evidence_ids=used_ids & fact_ids,
+            unsupported_claims=["final evidence was outside the research packet"],
+            confidence=0.0,
+        )
+    if action == "answer" and not used_ids:
+        return _decision(
+            "escalate", product, intent, ESCALATE,
+            unsupported_claims=["factual answer had no current evidence"],
+            confidence=0.0,
+        )
+    return _decision(
+        action,
+        product,
+        intent,
+        answer,
+        evidence_ids=used_ids,
+        missing_information=draft.get("missing_information", []),
+    )
+
+
 def _autonomous_response(query, turns, product_hint=None, force_reply=False):
     """Return the validated autonomous response text."""
     return autonomous_decision(
@@ -3189,7 +3768,7 @@ def _answer(message):
 
     # Safety net: this class of question goes to a person
     # even when the model decided it could handle it itself.
-    elif _MUST_ESCALATE_RE.search(text) and ESCALATE not in answer:
+    elif _requires_account_handoff(text) and ESCALATE not in answer:
         log.info(
             "Forcing handoff for message %s: money/account question the model tried to answer",
             message_id,
@@ -3335,6 +3914,17 @@ def _discord_safe_format(text):
         return url if label == url else "{} ({})".format(label, url)
 
     normalized = _MASKED_LINK_RE.sub(replace, text or "")
+    # Responses can occasionally include private-use citation-control glyphs
+    # (for example a lone U+E200 marker). They are not useful in Discord and
+    # render as visible garbage, so strip every Unicode private-use codepoint.
+    normalized = "".join(
+        char for char in normalized
+        if not (
+            0xE000 <= ord(char) <= 0xF8FF
+            or 0xF0000 <= ord(char) <= 0xFFFFD
+            or 0x100000 <= ord(char) <= 0x10FFFD
+        )
+    )
 
     def suppress(match):
         url = match.group(0)
@@ -3478,9 +4068,42 @@ def _merge_conversation_context(memory_turns, recent_turns):
 
     budget = max(1000, _env_int("CONVERSATION_CONTEXT_MAX_CHARS", 12000))
     while len(turns) > 1 and sum(len(turn["content"]) for turn in turns) > budget:
-        # Keep the compact summary when present, while dropping the oldest
-        # detailed turn first. Recent Discord context is appended last.
-        drop_at = 1 if turns[0]["content"].startswith("[SHORT-TERM CONVERSATION SUMMARY") else 0
+        # Keep the five newest user messages so Luna can resolve follow-ups
+        # even after a long ticket. Drop older/assistant context first.
+        protected_users = {
+            index for index, turn in list(enumerate(turns))[::-1]
+            if turn["role"] == "user"
+        }
+        protected_users = set(sorted(protected_users)[-5:])
+        drop_at = next(
+            (
+                index for index in range(len(turns) - 1)
+                if index not in protected_users
+                and not turns[index]["content"].startswith("[SHORT-TERM CONVERSATION SUMMARY")
+            ),
+            None,
+        )
+        if drop_at is None:
+            drop_at = next(
+                (index for index in range(len(turns) - 1) if index not in protected_users),
+                None,
+            )
+        if drop_at is None:
+            # Five unusually long user messages can exceed the prompt budget.
+            # Keep all five, but bound each oldest message instead of deleting
+            # the conversational fact that it exists.
+            truncatable = [
+                index for index in sorted(protected_users)
+                if len(turns[index]["content"]) > 400
+            ]
+            if not truncatable:
+                break
+            oldest = truncatable[0]
+            current = turns[oldest]["content"]
+            overflow = sum(len(turn["content"]) for turn in turns) - budget
+            keep = max(400, len(current) - overflow)
+            turns[oldest]["content"] = current[-keep:]
+            continue
         turns.pop(drop_at)
     return turns
 

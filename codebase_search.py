@@ -37,7 +37,23 @@ _SYMBOL_RE = re.compile(
     r"^\s*(?:(?:export|default|public|private|protected|static|async)\s+)*"
     r"(?:def|class|function|interface|type|enum|namespace|struct|const|let|var)\s+"
     r"[A-Za-z_$][\w$-]*"
-    r"|^\s*(?:async\s+)?[A-Za-z_$][\w$-]*\s*\([^\n]{0,180}\)\s*(?:=>|\{|:)",
+    r"|^\s*(?:(?:public|private|protected|static|async|readonly|abstract|override)\s+)*"
+    r"(?!if\b|for\b|while\b|switch\b|catch\b|with\b|return\b|else\b|try\b)"
+    r"[A-Za-z_$][\w$-]*\s*\([^\n]{0,180}\)\s*(?::[^=\{]{0,120})?(?:=>|\{|:)"
+    r"|^\s*(?:(?:public|private|protected|static|async|readonly|abstract|override)\s+)+"
+    r"[A-Za-z_$][\w$-]*\s*\(\s*$",
+    re.IGNORECASE,
+)
+_SECTION_SYMBOL_RE = re.compile(
+    r"^\s*(?:(?:export|default|public|private|protected|static|async|readonly|abstract|override)\s+)*"
+    r"(?:def|class|function|interface|type|enum|namespace|struct)\s+[A-Za-z_$][\w$-]*"
+    r"|^\s*(?:(?:export|default)\s+)*(?:const|let|var)\s+[A-Za-z_$][\w$-]*"
+    r"[^\n]{0,180}=\s*(?:async\s*)?(?:function\b|\([^\n]{0,120}\)\s*=>|[A-Za-z_$][\w$-]*\s*=>)"
+    r"|^\s*(?:(?:public|private|protected|static|async|readonly|abstract|override)\s+)*"
+    r"(?!if\b|for\b|while\b|switch\b|catch\b|with\b|return\b|else\b|try\b)"
+    r"[A-Za-z_$][\w$-]*\s*\([^\n]{0,180}\)\s*(?::[^=\{]{0,120})?(?:=>|\{|:)"
+    r"|^\s*(?:(?:public|private|protected|static|async|readonly|abstract|override)\s+)+"
+    r"[A-Za-z_$][\w$-]*\s*\(\s*$",
     re.IGNORECASE,
 )
 _ROUTE_RE = re.compile(
@@ -188,27 +204,44 @@ def _priority_token_queries(query: str) -> list[str]:
 
 
 def _workflow_queries(query: str) -> list[str]:
-    """Return precise anchors for a copy-trade capacity workflow.
+    """Return implementation anchors for common copy-trade workflow language.
 
-    Natural-language questions such as "does it skip or use a lower amount?"
-    rarely contain the implementation names that decide the behavior.  These
-    fixed anchors are only added for that narrow class of question; they do
-    not turn a general search into an arbitrary repository sweep.
+    Natural-language questions rarely contain the implementation names that
+    decide behavior. These bounded aliases bridge user language such as
+    leader/follower order or insufficient balance to the relevant watcher and
+    job functions without handing an arbitrary filesystem query to the model.
     """
     lowered = str(query or "").lower()
     about_copying = bool(re.search(r"\b(?:copy|follow|leader|position)\b", lowered))
     about_capacity = bool(re.search(
         r"\b(?:balance|funds?|afford|insufficient|lower|smaller|skip)\b", lowered,
     ))
-    if not (about_copying and about_capacity):
-        return []
-    return [
-        "verifyUserWalletConditions",
-        "Insufficient Effective Balance for Copy Trading",
-        "wallet condition failure",
-        "retryOpenPositionJob",
-        "Skipping position",
-    ]
+    queries = []
+    if about_copying and about_capacity:
+        queries.extend([
+            "verifyUserWalletConditions",
+            "Insufficient Effective Balance for Copy Trading",
+            "wallet condition failure",
+            "retryOpenPositionJob",
+            "Skipping position",
+        ])
+
+    about_order = bool(re.search(
+        r"\b(?:before|after|first|order|earlier|later|lands?|enters?|opens?)\b",
+        lowered,
+    ))
+    about_leader_follower = bool(
+        re.search(r"\b(?:leader|lead|target)\b", lowered)
+        and re.search(r"\b(?:copy|copying|follower|followed)\b", lowered)
+    )
+    if about_order and about_leader_follower:
+        queries.extend([
+            "copy-trade-transaction-watcher",
+            "processUserForCopyTrade",
+            "targetTransaction",
+            "copyTradeQueue.add",
+        ])
+    return list(dict.fromkeys(queries))
 
 
 def _redact(line: str) -> str | None:
@@ -635,11 +668,11 @@ def search_codebase(query: str, product: str | None, limit: int = 32) -> list[di
     # about signing, trading, and deposit addresses reach its precise wallet
     # documentation instead of unrelated product-name matches.
     semantic = _semantic_file_anchors(query, str(product), root, limit=8)
-    run_patterns(_priority_token_queries(query), per_pattern_limit=8)
     # Search execution anchors before the user's natural-language phrasing.
     # This keeps a generic "balance" match from crowding out the exact
     # balance-check/retry/skip workflow that answers the question.
     run_patterns(_workflow_queries(query), per_pattern_limit=16)
+    run_patterns(_priority_token_queries(query), per_pattern_limit=8)
     run_patterns(_queries(query), per_pattern_limit=8)
     # A single generic word is too noisy. Use it only if no phrase search found
     # anything, so a precise match such as "jup score" cannot be crowded out.
@@ -749,7 +782,7 @@ def _section_bounds(lines: list[str], anchor: int, suffix: str) -> tuple[int, in
 
     all_starts = [
         index for index, line in enumerate(lines, 1)
-        if _SYMBOL_RE.match(line) or _ROUTE_RE.search(line)
+        if _SECTION_SYMBOL_RE.match(line) or _ROUTE_RE.search(line)
     ]
     prior_starts = [index for index in all_starts if index <= anchor]
     start = prior_starts[-1] if prior_starts else max(1, anchor - 12)

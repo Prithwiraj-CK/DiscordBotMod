@@ -136,7 +136,7 @@ python index_discord_history.py --scan
 python index_discord_history.py
 ```
 
-`knowledge/approved_facts.json` contains the 52 facts that may be used as answers,
+`knowledge/approved_facts.json` contains the 53 facts that may be used as answers,
 their provenance, risk, and handling guidance. The Markdown one-pagers are
 supplemental notes. Product-owner clarifications, runtime behavior, and the
 official product documentation take precedence over older notes or examples.
@@ -161,7 +161,7 @@ those two repositories locally. This is a separate opt-in because the selected
 excerpts are sent to OpenAI as model context. Research is read-only: semantic
 query expansion, keyword search, filename/symbol/route/command/heading search,
 one-hop local-reference following, complete bounded function/section reads,
-and multiple evidence-review rounds are used. It excludes dependencies,
+and one bounded evidence-review pass are used. It excludes dependencies,
 generated files, logs/dumps/backups, binary assets, and secret-shaped files,
 and redacts sensitive-looking values. The model has no shell or filesystem-write
 tool. Code excerpts can explain exact implementation behavior; when enabled,
@@ -170,10 +170,10 @@ support, privacy, and product promises. Repository search is disabled by
 default.
 
 `REPOSITORY_SEARCH_BOTH=true` makes every non-social support question search
-both fixed repositories before drafting, so a wrong initial product classifier
+both fixed repositories before drafting, so a wrong initial product inference
 cannot hide an answer. `APPROVED_FACTS_ENABLED=true` keeps curated FAQ facts
-and deterministic FAQ shortcuts available for fees, product promises,
-onboarding, and security. Set it to `false` only for a repository-only shadow
+available as authoritative evidence for fees, product promises, onboarding,
+and security. Set it to `false` only for a repository-only shadow
 evaluation. It does **not** disable account-specific, secret, security, or
 money-risk escalation rules. Repository-only mode is useful for testing
 implementation questions, but it should not be considered a replacement for
@@ -183,31 +183,31 @@ verified public-policy facts such as fees or product promises.
 
 ```
 message in an allowed channel
-  → gateway event (discum), dispatched to a worker thread
-  → last N messages pulled for context
+  → Discord REST poll, dispatched to a worker thread
+  → scoped Redis memory plus recent Discord messages
+  → retain at least the current user's five previous messages
   → tagged images transcribed once as untrusted context
-  → structured classifier chooses product, intent, risk and action
-  → semantic query expansion plus keyword/filename/symbol/route/command search
+  → infer product only as a search hint; no classifier can decide the final answer
+  → search both fixed repositories by semantics, keywords, filenames, symbols, routes, commands, and headings
   → follow local references and read complete bounded functions or documentation sections
-  → retrieve matching approved facts, Markdown notes, historical excerpts, and safe code excerpts
-  → compare frontend, backend, routes, and docs during iterative evidence review
-  → structured drafter maps each factual claim to evidence and validates its action
+  → retrieve approved facts and current code as evidence; Markdown and old staff replies remain background only
+  → one bounded evidence review can follow missing references or synonyms
+  → Luna makes the final action and answer, maps each factual claim to current evidence, and validates it once
   → shadow proposal in the configured output channel, or autonomous handoff proposal
 ```
 
-A 5 minute sweep runs alongside as a safety net for anything the gateway
-missed. The gateway is the primary path, so on a healthy bot the sweep finds
-nothing almost every time.
+The REST poller is the live transport because the old user-account gateway was
+intermittent. It also performs bounded catch-up so a process restart does not
+silently lose a freshly tagged question.
 
 ## Notes
 
-- **It answers itself if you let it.** On a user account our own replies come
-  back through the gateway as ordinary messages (`author.bot` is false for us),
+- **It answers itself if you let it.** On a user account our own replies appear
+  in REST history as ordinary messages (`author.bot` is false for us),
   so the self-id check in `_should_answer` is the only thing preventing an
   endless conversation with ourselves. Do not remove it.
-- **Threads, not async.** discum is synchronous, so answers are produced on a
-  small `ThreadPoolExecutor`. The gateway callback must return immediately:
-  blocking it stalls the heartbeat and drops the connection.
+- **Threads, not async.** Answers are produced on a small
+  `ThreadPoolExecutor`, while the REST poller continues checking channels.
 - **Model calls.** Every model call goes through `llm.py`, which uses the
   Responses API so the configured reasoning model can plan and validate support
   research. Model responses are requested with `store=False`.

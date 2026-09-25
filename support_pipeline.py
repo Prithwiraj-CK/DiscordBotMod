@@ -312,6 +312,7 @@ def format_calculation_response(calculation: dict[str, Any]) -> str:
 def rank_evidence(items: list[dict[str, Any]], query: str, detection: dict[str, Any], limit: int = 8) -> list[dict[str, Any]]:
     """Rerank evidence by authority and exact UI terminology before drafting."""
     labels = [_norm(label) for label in detection.get("exact_labels", [])]
+    detected_product = str(detection.get("product") or "").casefold()
     source_weights = {
         "codebase_section": 60,
         "codebase_file": 55,
@@ -335,9 +336,16 @@ def rank_evidence(items: list[dict[str, Any]], query: str, detection: dict[str, 
         score = source_weights.get(str(item.get("source_type", "")), 20)
         if item.get("approved") is True:
             score = max(score, source_weights["approved_fact"])
+        item_product = str(item.get("product") or "").casefold()
+        if detected_product in {"valhalla", "olympus"} and item_product:
+            score += 36 if item_product == detected_product else -12
         score += sum(4 for word in query_words if word in normalized)
         score += sum(80 for label in labels if label in normalized)
         path = str(item.get("path", "")).casefold()
+        if path.startswith("src/") or "/src/" in path:
+            # For behavior questions, current executable code should survive
+            # broad keyword matches in plans, ADRs, and prose documentation.
+            score += 24
         if path.endswith((".md", ".mdx")) and "docs" in path:
             score += 18
         if any(part in path for part in ("schema", "settings", "config", "service", "types")):

@@ -2,8 +2,8 @@ import unittest
 from unittest.mock import patch
 
 from bot import (
-    _discord_messages, _discord_post_message, _resolve_follow_up_question,
-    _transport_mode,
+    _discord_messages, _discord_post_message, _discord_safe_format,
+    _resolve_follow_up_question, _transport_mode,
 )
 
 
@@ -46,6 +46,9 @@ class TransportModeTests(unittest.TestCase):
         )
         self.assertIn("What does Ratio % do when copying a wallet?", resolved)
         self.assertIn("i was asking about valhalla ratio", resolved)
+
+    def test_discord_format_removes_private_use_citation_glyphs(self):
+        self.assertEqual("grounded answer", _discord_safe_format("grounded answer\ue200"))
 
 
 if __name__ == "__main__":
