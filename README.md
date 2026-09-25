@@ -124,6 +124,19 @@ the latest rolling totals; it does not post a new message per question. The
 local `.runtime/openai_usage.jsonl` ledger stores only those counts and cost
 metadata—never Discord text, prompts, or replies.
 
+### 5.1 Bound one support turn
+
+Each support turn has an independent research budget: 50,000 cumulative input
+tokens, 24,000 tokens in one request context, 12,000 tool-output tokens, 10
+tool calls, 6 reads, 8 selected evidence items, and 75 seconds by default.
+The `RESEARCH_MAX_*` settings in `.env.example` configure those limits. Luna's
+exact local tokenizer is not available, so Salena uses `o200k_base` when
+available and otherwise reserves one token per three UTF-8 bytes—a deliberately
+conservative fallback. If a limit is reached, she hands off with incomplete
+evidence rather than guessing. Per-turn logs contain only token/count totals,
+the stop reason, and evidence IDs; they never include Discord text, source
+text, secrets, or answer text.
+
 ### 6. Validate the knowledge corpus
 
 The approved source-of-truth index and anonymized regression cases can be
@@ -196,8 +209,10 @@ message in an allowed channel
   → scoped Redis memory plus recent Discord messages
   → retain at least the current user's five previous messages
   → tagged images transcribed once as untrusted context
-  → infer product only as a search hint; no classifier can decide the final answer
-  → search both fixed repositories by semantics, keywords, filenames, symbols, routes, commands, and headings
+  → Olympus-only product scope and deterministic Valhalla handoff
+  → bounded semantic/keyword repository discovery with compact anchors
+  → bounded section reads and selected compact evidence packet
+  → per-turn token, tool, evidence, and wall-clock budget
   → follow local references and read complete bounded functions or documentation sections
   → retrieve approved facts and current code as evidence; Markdown and old staff replies remain background only
   → one bounded evidence review can follow missing references or synonyms

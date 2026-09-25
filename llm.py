@@ -15,14 +15,19 @@ before it calls load_dotenv(), so anything read at import would see an empty
 
 import json
 import logging
+import math
 import os
 import random
 import time
+from contextlib import contextmanager
+from contextvars import ContextVar
+from dataclasses import dataclass, field
+from typing import Optional
 
 import openai
 from openai import OpenAI
 
-from usage_reporting import record_usage
+from usage_reporting import record_usage, usage_counts
 
 log = logging.getLogger("support-bot.llm")
 
@@ -41,6 +46,210 @@ _RETRYABLE = (
 
 class LLMUnavailable(RuntimeError):
     """Every attempt failed. The caller decides what the user sees."""
+
+
+class ResearchBudgetExceeded(LLMUnavailable):
+    """A support turn reached a deterministic resource limit before drafting."""
+
+    def __init__(self, reason):
+        self.reason = str(reason)
+        super().__init__("Research budget exhausted: {}".format(self.reason))
+
+
+class ResearchLoopFinished(LLMUnavailable):
+    """The raw tool loop is done; the caller must draft from compact evidence."""
+
+    def __init__(self, reason):
+        self.reason = str(reason)
+        super().__init__("Research loop stopped: {}".format(self.reason))
+
+
+def _positive_int_env(name, default, minimum=1, maximum=None):
+    try:
+        value = int(os.getenv(name, str(default)))
+    except (TypeError, ValueError):
+        value = default
+    value = max(minimum, value)
+    return min(maximum, value) if maximum is not None else value
+
+
+_TOKENIZER = None
+_TOKENIZER_ATTEMPTED = False
+
+
+def estimate_tokens(value):
+    """Estimate tokens without sending content anywhere.
+
+    ``o200k_base`` is used when tiktoken is installed. Luna does not expose a
+    local exact tokenizer, so the fallback reserves one token per three UTF-8
+    bytes, deliberately more conservative than ordinary English token ratios.
+    """
+    global _TOKENIZER, _TOKENIZER_ATTEMPTED
+    if value is None:
+        return 0
+    if not isinstance(value, str):
+        try:
+            value = json.dumps(value, ensure_ascii=False, default=str, separators=(",", ":"))
+        except (TypeError, ValueError):
+            value = str(value)
+    if not value:
+        return 0
+    if not _TOKENIZER_ATTEMPTED:
+        _TOKENIZER_ATTEMPTED = True
+        try:
+            import tiktoken
+            _TOKENIZER = tiktoken.get_encoding("o200k_base")
+        except (ImportError, KeyError, ValueError):
+            _TOKENIZER = None
+    if _TOKENIZER is not None:
+        try:
+            return len(_TOKENIZER.encode(value))
+        except (TypeError, ValueError):
+            pass
+    return max(1, int(math.ceil(len(value.encode("utf-8")) / 3)))
+
+
+@dataclass
+class ResearchBudget:
+    """Per-support-turn limits and privacy-safe accounting state.
+
+    Each instance belongs to one worker's support turn. ``ContextVar`` below
+    prevents concurrent worker threads from sharing counters.
+    """
+
+    max_total_input_tokens: int = 50_000
+    max_context_tokens: int = 24_000
+    max_tool_output_tokens: int = 12_000
+    max_tool_calls: int = 10
+    max_read_calls: int = 6
+    max_evidence_items: int = 8
+    max_wall_seconds: float = 75.0
+    started_at: float = field(default_factory=time.monotonic)
+    input_tokens: int = 0
+    cached_input_tokens: int = 0
+    output_tokens: int = 0
+    reasoning_tokens: int = 0
+    estimated_input_tokens: int = 0
+    tool_output_tokens: int = 0
+    tool_calls: int = 0
+    read_calls: int = 0
+    evidence_ids: list[str] = field(default_factory=list)
+    api_calls: int = 0
+    stop_reason: Optional[str] = None
+
+    @classmethod
+    def from_environment(cls):
+        return cls(
+            max_total_input_tokens=_positive_int_env("RESEARCH_MAX_TOTAL_INPUT_TOKENS", 50_000),
+            max_context_tokens=_positive_int_env("RESEARCH_MAX_CONTEXT_TOKENS", 24_000),
+            max_tool_output_tokens=_positive_int_env("RESEARCH_MAX_TOOL_OUTPUT_TOKENS", 12_000),
+            max_tool_calls=_positive_int_env("RESEARCH_MAX_TOOL_CALLS", 10),
+            max_read_calls=_positive_int_env("RESEARCH_MAX_READ_CALLS", 6),
+            max_evidence_items=_positive_int_env("RESEARCH_MAX_EVIDENCE_ITEMS", 8),
+            max_wall_seconds=float(_positive_int_env("RESEARCH_MAX_WALL_SECONDS", 75)),
+        )
+
+    def _exhaust(self, reason):
+        self.stop_reason = self.stop_reason or str(reason)
+        raise ResearchBudgetExceeded(reason)
+
+    def check_time(self):
+        if time.monotonic() - self.started_at >= self.max_wall_seconds:
+            self._exhaust("time_budget")
+
+    def before_model_call(self, estimated_input):
+        self.check_time()
+        estimated_input = max(0, int(estimated_input or 0))
+        if estimated_input > self.max_context_tokens:
+            self._exhaust("context_budget")
+        projected = max(self.input_tokens, self.estimated_input_tokens) + estimated_input
+        if projected > self.max_total_input_tokens:
+            self._exhaust("token_budget")
+        self.estimated_input_tokens += estimated_input
+        return estimated_input
+
+    def record_response(self, usage, estimated_input=0):
+        counts = usage_counts(usage)
+        self.api_calls += 1
+        self.input_tokens += counts["input_tokens"]
+        self.cached_input_tokens += counts["cached_input_tokens"]
+        self.output_tokens += counts["output_tokens"]
+        self.reasoning_tokens += counts["reasoning_tokens"]
+        # Missing SDK usage is uncommon but must not disable the guard.
+        if counts["input_tokens"] == 0:
+            self.estimated_input_tokens = max(self.estimated_input_tokens, int(estimated_input or 0))
+        if self.input_tokens > self.max_total_input_tokens:
+            self._exhaust("token_budget")
+
+    def reserve_tool_call(self, name):
+        self.check_time()
+        if self.tool_calls >= self.max_tool_calls:
+            self._exhaust("tool_budget")
+        self.tool_calls += 1
+        if str(name).startswith("read_"):
+            if self.read_calls >= self.max_read_calls:
+                self._exhaust("tool_budget")
+            self.read_calls += 1
+
+    def record_tool_output(self, payload):
+        self.check_time()
+        tokens = estimate_tokens(payload)
+        if self.tool_output_tokens + tokens > self.max_tool_output_tokens:
+            self._exhaust("token_budget")
+        self.tool_output_tokens += tokens
+        return tokens
+
+    def remaining_tool_output_tokens(self):
+        return max(0, self.max_tool_output_tokens - self.tool_output_tokens)
+
+    def remaining_evidence_items(self):
+        return max(0, self.max_evidence_items - len(self.evidence_ids))
+
+    def select_evidence(self, items):
+        selected = []
+        for item in items:
+            evidence_id = str(item.get("id") or "")
+            if not evidence_id or evidence_id in self.evidence_ids:
+                continue
+            if len(self.evidence_ids) >= self.max_evidence_items:
+                break
+            self.evidence_ids.append(evidence_id)
+            selected.append(item)
+        return selected
+
+    def note_stop(self, reason, replace=False):
+        if replace or not self.stop_reason:
+            self.stop_reason = str(reason)
+
+    def summary(self):
+        return {
+            "stop_reason": self.stop_reason or "complete",
+            "api_calls": self.api_calls,
+            "input_tokens": self.input_tokens,
+            "cached_input_tokens": self.cached_input_tokens,
+            "output_tokens": self.output_tokens,
+            "reasoning_tokens": self.reasoning_tokens,
+            "tool_output_tokens": self.tool_output_tokens,
+            "tool_calls": self.tool_calls,
+            "read_calls": self.read_calls,
+            "evidence_ids": list(self.evidence_ids),
+        }
+
+
+_CURRENT_RESEARCH_BUDGET = ContextVar("current_research_budget", default=None)
+
+
+@contextmanager
+def research_budget_scope(budget):
+    token = _CURRENT_RESEARCH_BUDGET.set(budget)
+    try:
+        yield budget
+    finally:
+        _CURRENT_RESEARCH_BUDGET.reset(token)
+
+
+def current_research_budget():
+    return _CURRENT_RESEARCH_BUDGET.get()
 
 
 def _timeout_seconds():
@@ -169,12 +378,29 @@ def _response_input(messages):
     return items
 
 
-def _record_response_usage(response, model):
+def _reserve_model_input(instructions, input_payload, tools=None, text_format=None):
+    """Check the active turn before an API call, without retaining content."""
+    budget = current_research_budget()
+    if budget is None:
+        return 0
+    estimated = (
+        estimate_tokens(instructions)
+        + estimate_tokens(input_payload)
+        + estimate_tokens(tools)
+        + estimate_tokens(text_format)
+    )
+    return budget.before_model_call(estimated)
+
+
+def _record_response_usage(response, model, estimated_input=0):
     """Best-effort accounting must never make a support reply fail."""
     try:
         record_usage(model, getattr(response, "usage", None))
     except Exception:
         log.exception("Could not record OpenAI usage")
+    budget = current_research_budget()
+    if budget is not None:
+        budget.record_response(getattr(response, "usage", None), estimated_input)
 
 
 def ask_llm(system_prompt, messages):
@@ -195,6 +421,7 @@ def ask_llm(system_prompt, messages):
     for attempt in range(1, attempts + 1):
         try:
             model = _model_name()
+            estimated_input = _reserve_model_input(system_prompt, messages)
             response = _get_client().responses.create(
                 model=model,
                 instructions=system_prompt,
@@ -203,7 +430,7 @@ def ask_llm(system_prompt, messages):
                 reasoning={"effort": _reasoning_effort()},
                 store=False,
             )
-            _record_response_usage(response, model)
+            _record_response_usage(response, model, estimated_input)
             return (response.output_text or "").strip()
 
         except openai.AuthenticationError as exc:
@@ -254,6 +481,7 @@ def ask_json(system_prompt, messages, schema, name="structured_response", temper
     for attempt in range(1, attempts + 1):
         try:
             model = _model_name()
+            estimated_input = _reserve_model_input(system_prompt, messages, text_format=text_format)
             response = _get_client().responses.create(
                 model=model,
                 instructions=system_prompt,
@@ -263,7 +491,7 @@ def ask_json(system_prompt, messages, schema, name="structured_response", temper
                 text={"format": text_format},
                 store=False,
             )
-            _record_response_usage(response, model)
+            _record_response_usage(response, model, estimated_input)
             content = (response.output_text or "").strip()
             if not content:
                 raise ValueError("OpenAI returned an empty structured response")
@@ -344,6 +572,9 @@ def ask_json_with_tools(system_prompt, messages, schema, tools, tool_executor,
         # so Luna can decide whether another file needs to be opened.
         tool_choice = "required" if round_number == 0 and require_initial_tool else "auto"
         try:
+            estimated_input = _reserve_model_input(
+                system_prompt, input_items, tools=tools, text_format=text_format,
+            )
             response = _get_client().responses.create(
                 model=model,
                 instructions=system_prompt,
@@ -356,7 +587,7 @@ def ask_json_with_tools(system_prompt, messages, schema, tools, tool_executor,
                 text={"format": text_format},
                 store=False,
             )
-            _record_response_usage(response, model)
+            _record_response_usage(response, model, estimated_input)
         except openai.AuthenticationError as exc:
             raise LLMUnavailable("OpenAI rejected the API key: {}".format(exc)) from exc
         except openai.BadRequestError as exc:
@@ -375,17 +606,10 @@ def ask_json_with_tools(system_prompt, messages, schema, tools, tool_executor,
             if getattr(item, "type", None) == "function_call"
         ]
         if not function_calls:
-            content = (response.output_text or "").strip()
-            if not content:
-                raise LLMUnavailable("OpenAI ended the research loop without a final response")
-            try:
-                value = json.loads(content)
-            except ValueError as exc:
-                raise LLMUnavailable("OpenAI returned invalid tool-loop JSON") from exc
-            if not isinstance(value, dict):
-                raise LLMUnavailable("OpenAI tool-loop JSON was not an object")
-            log.info("Tool research completed after %s tool round(s)", round_number)
-            return value
+            # Do not draft from the accumulated raw model/tool transcript.
+            # The caller receives this marker and builds one fresh, selected
+            # evidence packet for the final writer.
+            raise ResearchLoopFinished("complete")
 
         log.info(
             "Tool research round %s/%s: %s",
@@ -399,10 +623,17 @@ def ask_json_with_tools(system_prompt, messages, schema, tools, tool_executor,
         input_items.extend(getattr(response, "output", None) or [])
         for call in function_calls:
             try:
+                budget = current_research_budget()
+                if budget is not None:
+                    budget.reserve_tool_call(str(getattr(call, "name", "")))
                 arguments = json.loads(getattr(call, "arguments", "{}") or "{}")
                 if not isinstance(arguments, dict):
                     raise ValueError("arguments were not an object")
                 result = tool_executor(str(getattr(call, "name", "")), arguments)
+                if budget is not None:
+                    budget.record_tool_output(result)
+            except ResearchBudgetExceeded:
+                raise
             except Exception as exc:  # The model receives a bounded tool error and can recover.
                 log.warning("Research tool %s failed: %s", getattr(call, "name", "unknown"), exc)
                 result = {"error": "The requested research tool was unavailable for this step."}
@@ -413,39 +644,7 @@ def ask_json_with_tools(system_prompt, messages, schema, tools, tool_executor,
             })
 
         if round_number == rounds - 1:
-            # The model has completed the allowed research budget. Its final
-            # request intentionally has no tools, so it must synthesize the
-            # evidence it already gathered rather than turn a well-researched
-            # support question into a generic handoff.
-            try:
-                final_response = _get_client().responses.create(
-                    model=model,
-                    instructions=(
-                        system_prompt
-                        + "\n\nThe research budget is complete. Use the collected tool results "
-                        "to return the final JSON answer now; do not request another tool."
-                    ),
-                    input=input_items,
-                    max_output_tokens=_json_max_output_tokens(),
-                    reasoning={"effort": _reasoning_effort()},
-                    text={"format": text_format},
-                    store=False,
-                )
-                _record_response_usage(final_response, model)
-                content = (final_response.output_text or "").strip()
-                value = json.loads(content)
-                if not isinstance(value, dict):
-                    raise ValueError("final JSON was not an object")
-                log.info("Tool research reached its budget and finalized from collected evidence")
-                return value
-            except (ValueError, TypeError) as exc:
-                raise LLMUnavailable("Research budget finalization returned invalid JSON") from exc
-            except openai.AuthenticationError as exc:
-                raise LLMUnavailable("OpenAI rejected the API key: {}".format(exc)) from exc
-            except openai.BadRequestError as exc:
-                raise LLMUnavailable("OpenAI rejected research finalization: {}".format(exc)) from exc
-            except _RETRYABLE as exc:
-                raise LLMUnavailable("OpenAI could not finalize completed research: {}".format(exc)) from exc
+            raise ResearchLoopFinished("tool_budget")
 
     raise LLMUnavailable(
         "Tool research unavailable: {}".format(last_error or "research loop did not finish")

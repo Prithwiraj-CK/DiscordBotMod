@@ -63,7 +63,7 @@ def _field(value, name):
     return getattr(value, name, None)
 
 
-def _usage_counts(usage):
+def usage_counts(usage):
     """Read usage across SDK object and dict shapes without logging content."""
     details = _field(usage, "input_tokens_details")
     output_details = _field(usage, "output_tokens_details")
@@ -102,7 +102,7 @@ def record_usage(model, usage, now=None):
     if usage is None:
         return
     timestamp = float(time.time() if now is None else now)
-    counts = _usage_counts(usage)
+    counts = usage_counts(usage)
     event = {
         "timestamp": timestamp,
         "model": str(model),

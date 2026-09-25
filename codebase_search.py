@@ -17,6 +17,8 @@ import threading
 import time
 from pathlib import Path
 
+from llm import estimate_tokens
+
 log = logging.getLogger("support-bot.codebase")
 
 _STOPWORDS = {
@@ -683,7 +685,12 @@ def search_codebase(query: str, product: str | None, limit: int = 32) -> list[di
     # while exact content matches remain available for the evidence reviewer.
     combined = (semantic + results + structural)[:min(64, max(1, limit))]
     combined.extend(_reference_anchors(query, str(product), root, combined, limit=8))
-    return combined[:min(72, max(1, limit + 8))]
+    compact = combined[:min(72, max(1, limit + 8))]
+    for index, item in enumerate(compact, 1):
+        # A stable ordering score lets the model choose a bounded number of
+        # anchors without receiving whole matched source lines as search proof.
+        item["score"] = max(1, 100 - index)
+    return compact
 
 
 def _safe_codebase_path(product: str | None, relative_path: str) -> tuple[Path, Path] | None:
@@ -712,6 +719,7 @@ def read_codebase_file(
     relative_path: str,
     start_line: int = 1,
     end_line: int | None = None,
+    max_tokens: int = 2400,
 ) -> dict | None:
     """Read a bounded line range from a safe file under a configured root.
 
@@ -740,12 +748,26 @@ def read_codebase_file(
     if start_line > len(lines) or end_line < start_line:
         return None
     rendered = []
+    try:
+        token_limit = max(1, int(max_tokens))
+    except (TypeError, ValueError):
+        token_limit = 2400
+    used_tokens = 0
+    truncated = False
     for number in range(start_line, end_line + 1):
         safe_line = _redact(lines[number - 1])
         if safe_line:
-            rendered.append("{}: {}".format(number, safe_line))
+            rendered_line = "{}: {}".format(number, safe_line)
+            line_tokens = estimate_tokens(rendered_line)
+            if used_tokens + line_tokens > token_limit:
+                truncated = True
+                break
+            rendered.append(rendered_line)
+            used_tokens += line_tokens
     if not rendered:
         return None
+    if truncated and used_tokens + estimate_tokens("[truncated at token limit]") <= token_limit:
+        rendered.append("[truncated at token limit]")
     relative = path.relative_to(root).as_posix()
     return {
         "id": "codebase.{}.{}.{}-{}".format(product, relative, start_line, end_line),
@@ -754,7 +776,7 @@ def read_codebase_file(
         "source": "{}:{}-{}".format(relative, start_line, end_line),
         "path": relative,
         "line": start_line,
-        "fact": "\n".join(rendered)[:12000],
+        "fact": "\n".join(rendered),
         "answer_guidance": "Read-only implementation context; use only behavior directly supported by these lines.",
     }
 
@@ -820,6 +842,7 @@ def read_codebase_section(
     product: str | None,
     relative_path: str,
     line_number: int,
+    max_tokens: int = 2400,
 ) -> dict | None:
     """Read the complete bounded function or documentation section around a hit."""
     resolved = _safe_codebase_path(product, relative_path)
@@ -833,7 +856,7 @@ def read_codebase_section(
     if not lines:
         return None
     start, end = _section_bounds(lines, line_number, path.suffix)
-    excerpt = read_codebase_file(product, relative_path, start, end)
+    excerpt = read_codebase_file(product, relative_path, start, end, max_tokens=max_tokens)
     if not excerpt:
         return None
     excerpt["id"] = "codebase.{}.{}.section-{}-{}".format(product, relative_path, start, end)

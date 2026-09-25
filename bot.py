@@ -59,7 +59,11 @@ from knowledge import (
     history_prompt, load_knowledge, notes_prompt, retrieve_facts,
     retrieve_history, retrieve_notes,
 )
-from llm import LLMUnavailable, ask_json, ask_json_with_tools
+from llm import (
+    LLMUnavailable, ResearchBudget, ResearchBudgetExceeded, ResearchLoopFinished,
+    ask_json, ask_json_with_tools, current_research_budget, estimate_tokens,
+    research_budget_scope,
+)
 from support_pipeline import (
     DEFAULT_SUPPORTED_PRODUCT, SUPPORTED_PRODUCTS, analysis_log,
     calculate_support_values, detect_product_feature, extract_question,
@@ -3483,6 +3487,41 @@ def _tool_evidence_payload(item):
     }
 
 
+def _short_tool_preview(value, max_tokens=60):
+    """Return a privacy-safe bounded preview for repository search anchors."""
+    words = str(value or "").split()
+    preview = []
+    for word in words:
+        candidate = " ".join(preview + [word])
+        if estimate_tokens(candidate) > max_tokens:
+            break
+        preview.append(word)
+    text = " ".join(preview)
+    return text + ("…" if len(preview) < len(words) else "")
+
+
+def _repository_anchor_payload(item):
+    """Expose only compact discovery anchors; a read is required for proof."""
+    return {
+        "id": item.get("id"),
+        "path": item.get("path"),
+        "line": item.get("line"),
+        "type": item.get("source_type"),
+        "score": item.get("score", 0),
+        "preview": _short_tool_preview(item.get("fact")),
+    }
+
+
+def _final_evidence_packet(evidence, max_items):
+    """Select only final-answer evidence, never raw repository anchors."""
+    final_types = {"approved_fact", "codebase_section", "codebase_file"}
+    selected = [
+        item for item in evidence
+        if str(item.get("source_type") or "") in final_types
+    ]
+    return selected[:max(0, int(max_items))]
+
+
 def _deterministic_research_failures(query, draft, valid_ids, factual_question):
     """Check mechanical safety invariants without a second model veto.
 
@@ -3529,9 +3568,12 @@ def _luna_tool_research_decision(query, turns, product_hint=None, force_reply=Fa
     intent = _intent_hint(resolved_query) or "unknown"
     collected = OrderedDict()
     research_state = {"discoveries": 0, "reads": 0}
+    budget = current_research_budget()
+    if budget is None:
+        raise RuntimeError("live research requires an active ResearchBudget")
 
     def remember(items):
-        kept = []
+        scoped = []
         for item in items:
             item_product = str(item.get("product") or product).lower()
             if item_product != product or not is_supported_product(item_product):
@@ -3539,9 +3581,11 @@ def _luna_tool_research_decision(query, turns, product_hint=None, force_reply=Fa
                 continue
             evidence_id = str(item.get("id") or "")
             if evidence_id:
-                collected[evidence_id] = item
-                kept.append(item)
-        return kept
+                scoped.append(item)
+        selected = budget.select_evidence(scoped)
+        for item in selected:
+            collected[str(item["id"])] = item
+        return selected
 
     def execute_tool(name, arguments):
         requested_product = str(arguments.get("product") or "").lower()
@@ -3562,12 +3606,15 @@ def _luna_tool_research_decision(query, turns, product_hint=None, force_reply=Fa
         if name == "search_repository":
             research_state["discoveries"] += 1
             hits = search_codebase(tool_query, selected_product, limit=min(20, max(1, int(arguments.get("limit", 12)))))
-            return {"results": [_tool_evidence_payload(item) for item in remember(hits)]}
+            return {"results": [_repository_anchor_payload(item) for item in hits[:8]]}
         if name == "read_repository_section":
             if research_state["reads"] >= 2:
                 return {"error": "Read phase is complete. Assess the collected evidence and return the final answer."}
             research_state["reads"] += 1
-            item = read_codebase_section(selected_product, str(arguments.get("path") or ""), int(arguments.get("line", 1)))
+            item = read_codebase_section(
+                selected_product, str(arguments.get("path") or ""), int(arguments.get("line", 1)),
+                max_tokens=min(2400, max(1, budget.remaining_tool_output_tokens())),
+            )
             if item and remember([item]):
                 return {"result": _tool_evidence_payload(item)}
             return {"error": "That repository section was not available."}
@@ -3579,7 +3626,10 @@ def _luna_tool_research_decision(query, turns, product_hint=None, force_reply=Fa
             end = int(arguments.get("end_line", start))
             if end < start or end - start > 249:
                 return {"error": "Choose a valid bounded range of at most 250 lines."}
-            item = read_codebase_file(selected_product, str(arguments.get("path") or ""), start, end)
+            item = read_codebase_file(
+                selected_product, str(arguments.get("path") or ""), start, end,
+                max_tokens=min(2400, max(1, budget.remaining_tool_output_tokens())),
+            )
             if item and remember([item]):
                 return {"result": _tool_evidence_payload(item)}
             return {"error": "That repository range was not available."}
@@ -3587,7 +3637,11 @@ def _luna_tool_research_decision(query, turns, product_hint=None, force_reply=Fa
             research_state["discoveries"] += 1
             if not APPROVED_FACTS_ENABLED:
                 return {"results": [], "notice": "Approved facts are currently disabled."}
-            facts = retrieve_facts(tool_query, product=selected_product, intent=str(arguments.get("intent") or intent), limit=12)
+            facts = retrieve_facts(
+                tool_query, product=selected_product,
+                intent=str(arguments.get("intent") or intent),
+                limit=min(4, budget.remaining_evidence_items()),
+            )
             return {"results": [_tool_evidence_payload(item) for item in remember(facts)]}
         if name == "search_staff_examples":
             return {"error": "Staff-history search is not part of this answer workflow. Use the current conversation for context."}
@@ -3601,14 +3655,17 @@ def _luna_tool_research_decision(query, turns, product_hint=None, force_reply=Fa
     ).format(query, resolved_query, product or "unknown", intent)
     agent_turns = list(context_turns) + [{"role": "user", "content": base_prompt}]
     # This is deliberately not environment-configurable: the state machine is
-    # exactly two discovery calls plus two complete reads, followed by one
-    # no-tools synthesis turn in ask_json_with_tools().
+    # exactly two discovery calls plus two complete reads. Drafting happens
+    # separately from a fresh, compact evidence packet.
     max_rounds = 4
 
     def final_from_collected_evidence(instruction):
-        """Produce an answer from completed research if a tool turn misbehaves."""
-        evidence = list(collected.values())
+        """Draft from a new packet, never the raw tool-loop transcript."""
+        evidence = _final_evidence_packet(
+            list(collected.values()), budget.max_evidence_items,
+        )
         if not evidence:
+            budget.note_stop("no_progress", replace=True)
             return None
         try:
             return ask_json(
@@ -3621,7 +3678,10 @@ def _luna_tool_research_decision(query, turns, product_hint=None, force_reply=Fa
                 name="support_luna_research_finalization",
                 temperature=0.0,
             )
+        except ResearchBudgetExceeded:
+            raise
         except Exception as exc:
+            budget.note_stop("failure")
             log.warning("Luna researched finalization unavailable: %s", exc)
             return None
 
@@ -3636,7 +3696,17 @@ def _luna_tool_research_decision(query, turns, product_hint=None, force_reply=Fa
             max_tool_rounds=max_rounds,
             require_initial_tool=factual_question,
         )
+    except ResearchLoopFinished as stopped:
+        budget.note_stop(stopped.reason)
+        draft = final_from_collected_evidence(
+            "Research is complete. Answer the user's latest question directly from the selected evidence."
+        )
+        if draft is None:
+            return _decision("escalate", product or "unknown", intent, ESCALATE, confidence=0.0)
+    except ResearchBudgetExceeded:
+        raise
     except LLMUnavailable as exc:
+        budget.note_stop("failure")
         log.warning("Luna tool research unavailable: %s", exc)
         draft = final_from_collected_evidence(
             "The research loop ended unexpectedly after collecting evidence. Answer the user's latest question directly from it."
@@ -3648,7 +3718,7 @@ def _luna_tool_research_decision(query, turns, product_hint=None, force_reply=Fa
     if force_reply and action == "ignore":
         draft.update({"action": "clarify", "draft_answer": "What would you like help with?", "evidence_ids": [], "claim_evidence": []})
         action = "clarify"
-    evidence = list(collected.values())
+    evidence = _final_evidence_packet(list(collected.values()), budget.max_evidence_items)
     valid_ids = {str(item.get("id") or "") for item in evidence}
     failures, used_ids = _deterministic_research_failures(query, draft, valid_ids, factual_question)
     answer = str(draft.get("draft_answer") or "").strip()
@@ -3665,6 +3735,7 @@ def _luna_tool_research_decision(query, turns, product_hint=None, force_reply=Fa
             answer = str(draft.get("draft_answer") or "").strip()
 
     if not failures:
+        budget.note_stop("complete")
         if action == "ignore":
             return _decision("ignore", product or "generic", intent, IGNORE, confidence=0.8)
         if action == "escalate":
@@ -3688,9 +3759,31 @@ def autonomous_decision(query, turns, product_hint=None, force_reply=False):
     # Luna now owns the investigation itself through the bounded read-only
     # tool loop above. The older one-shot collector remains below temporarily
     # for audit history, but is intentionally unreachable in live support.
-    return _luna_tool_research_decision(
-        query, turns, product_hint=product_hint, force_reply=force_reply,
-    )
+    budget = ResearchBudget.from_environment()
+    with research_budget_scope(budget):
+        try:
+            decision = _luna_tool_research_decision(
+                query, turns, product_hint=product_hint, force_reply=force_reply,
+            )
+        except ResearchBudgetExceeded as exc:
+            budget.note_stop(exc.reason)
+            decision = _decision(
+                "escalate", DEFAULT_SUPPORTED_PRODUCT, "research_budget", ESCALATE,
+                missing_information=["budget exhausted / evidence incomplete"],
+                unsupported_claims=["research stopped: {}".format(exc.reason)],
+                confidence=0.0,
+            )
+        finally:
+            summary = budget.summary()
+            log.info(
+                "Research turn totals: stop=%s api_calls=%s input=%s cached=%s output=%s "
+                "reasoning=%s tool_output=%s tools=%s reads=%s evidence_ids=%s",
+                summary["stop_reason"], summary["api_calls"], summary["input_tokens"],
+                summary["cached_input_tokens"], summary["output_tokens"],
+                summary["reasoning_tokens"], summary["tool_output_tokens"],
+                summary["tool_calls"], summary["read_calls"], summary["evidence_ids"],
+            )
+    return decision
 
     context_turns = _luna_conversation_window(turns)
     resolved_query = _resolve_follow_up_question(query, context_turns)
