@@ -201,6 +201,25 @@ money-risk escalation rules. Repository-only mode is useful for testing
 implementation questions, but it should not be considered a replacement for
 verified public-policy facts such as fees or product promises.
 
+### Olympus repository investigation tools
+
+`olympus_repository_tools.py` provides an Olympus-only, read-only tool session
+for a future expanded Luna research loop. Search calls issue opaque per-session
+anchor IDs; section, caller, reference, and test reads dereference only those
+issued IDs, never model-supplied filesystem paths. Every response carries
+size/token metadata and emits a privacy-safe trace without question or source
+text. Search anchors are non-citable; only a bounded completed read can become
+repository evidence.
+
+The layer rejects path traversal, escaping symlinks, `.env`, secret/credential
+files, dependencies, generated output, logs, dumps, and oversized or binary
+files. It exposes a fixed repository revision check using read-only Git
+commands. `run_allowlisted_test` recognises only hard-coded command IDs, but
+currently returns `test_execution_unavailable`: this runtime has no OS-level
+sandbox that can safely execute untrusted repository test code without allowing
+writes or network access. It intentionally does not fall back to a local shell.
+These tools are not registered in the live agent loop yet.
+
 ## How it works
 
 ```

@@ -90,7 +90,8 @@ _TEXT_EXTENSIONS = {
 }
 _EXCLUDED_PARTS = {
     ".git", "node_modules", ".next", "dist", "build", "coverage", "vendor",
-    "logs", "output", "tmp", "backup", "backups",
+    "generated", "logs", "output", "tmp", "backup", "backups", "dumps",
+    "secrets", "credentials",
 }
 
 _STRUCTURAL_CACHE: dict[str, tuple[float, tuple, list[dict]]] = {}
@@ -113,6 +114,7 @@ _EXCLUDED_GLOBS = (
     "!build/**",
     "!coverage/**",
     "!vendor/**",
+    "!generated/**",
     "!logs/**",
     "!output/**",
     "!tmp/**",
@@ -889,7 +891,10 @@ def _safe_codebase_path(product: str | None, relative_path: str) -> tuple[Path, 
         return None
     if path.name.lower() == ".env" or path.name.lower().startswith(".env."):
         return None
-    excluded_parts = {".git", "node_modules", ".next", "dist", "build", "coverage", "logs", "output", "tmp", "backup", "backups"}
+    excluded_parts = {
+        ".git", "node_modules", ".next", "dist", "build", "coverage", "generated", "logs",
+        "output", "tmp", "backup", "backups", "dumps", "secrets", "credentials",
+    }
     if any(part.lower() in excluded_parts for part in path.parts):
         return None
     if any(marker in path.name.lower() for marker in ("secret", "credential", "private", "log", "dump")):
