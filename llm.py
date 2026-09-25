@@ -541,7 +541,7 @@ def ask_json(system_prompt, messages, schema, name="structured_response", temper
 
 def ask_json_with_tools(system_prompt, messages, schema, tools, tool_executor,
                         name="tool_research_response", max_tool_rounds=6,
-                        require_initial_tool=False):
+                        require_initial_tool=False, executor_manages_budget=False):
     """Run a bounded Responses API research loop and return its final JSON.
 
     ``tool_executor`` is deliberately supplied by the caller.  This module
@@ -571,35 +571,47 @@ def ask_json_with_tools(system_prompt, messages, schema, tools, tool_executor,
         # still receive a normal short reply. Subsequent turns stay automatic
         # so Luna can decide whether another file needs to be opened.
         tool_choice = "required" if round_number == 0 and require_initial_tool else "auto"
-        try:
-            estimated_input = _reserve_model_input(
-                system_prompt, input_items, tools=tools, text_format=text_format,
-            )
-            response = _get_client().responses.create(
-                model=model,
-                instructions=system_prompt,
-                input=input_items,
-                tools=tools,
-                tool_choice=tool_choice,
-                parallel_tool_calls=False,
-                max_output_tokens=_json_max_output_tokens(),
-                reasoning={"effort": _reasoning_effort()},
-                text={"format": text_format},
-                store=False,
-            )
-            _record_response_usage(response, model, estimated_input)
-        except openai.AuthenticationError as exc:
-            raise LLMUnavailable("OpenAI rejected the API key: {}".format(exc)) from exc
-        except openai.BadRequestError as exc:
-            raise LLMUnavailable("OpenAI rejected the tool research request: {}".format(exc)) from exc
-        except _RETRYABLE as exc:
-            last_error = exc
-            if round_number >= rounds:
+        # Transport retries belong to this one research operation.  They must
+        # not advance ``round_number``: a transient timeout must not turn a
+        # useful investigation into a tool-budget exhaustion.
+        response = None
+        for attempt in range(1, _max_attempts() + 1):
+            try:
+                estimated_input = _reserve_model_input(
+                    system_prompt, input_items, tools=tools, text_format=text_format,
+                )
+                response = _get_client().responses.create(
+                    model=model,
+                    instructions=system_prompt,
+                    input=input_items,
+                    tools=tools,
+                    tool_choice=tool_choice,
+                    parallel_tool_calls=False,
+                    max_output_tokens=_json_max_output_tokens(),
+                    reasoning={"effort": _reasoning_effort()},
+                    text={"format": text_format},
+                    store=False,
+                )
+                _record_response_usage(response, model, estimated_input)
                 break
-            delay = _retry_delay(round_number + 1)
-            log.warning("Tool research request failed: %s. Retrying in %.1fs", type(exc).__name__, delay)
-            time.sleep(delay)
-            continue
+            except openai.AuthenticationError as exc:
+                raise LLMUnavailable("OpenAI rejected the API key: {}".format(exc)) from exc
+            except openai.BadRequestError as exc:
+                raise LLMUnavailable("OpenAI rejected the tool research request: {}".format(exc)) from exc
+            except _RETRYABLE as exc:
+                last_error = exc
+                if attempt == _max_attempts():
+                    break
+                delay = _retry_delay(attempt)
+                log.warning(
+                    "Tool research operation failed (attempt %s/%s): %s. Retrying in %.1fs",
+                    attempt, _max_attempts(), type(exc).__name__, delay,
+                )
+                time.sleep(delay)
+        if response is None:
+            raise LLMUnavailable(
+                "Tool research unavailable: {}".format(last_error or "request failed")
+            ) from last_error
 
         function_calls = [
             item for item in (getattr(response, "output", None) or [])
@@ -624,13 +636,13 @@ def ask_json_with_tools(system_prompt, messages, schema, tools, tool_executor,
         for call in function_calls:
             try:
                 budget = current_research_budget()
-                if budget is not None:
+                if budget is not None and not executor_manages_budget:
                     budget.reserve_tool_call(str(getattr(call, "name", "")))
                 arguments = json.loads(getattr(call, "arguments", "{}") or "{}")
                 if not isinstance(arguments, dict):
                     raise ValueError("arguments were not an object")
                 result = tool_executor(str(getattr(call, "name", "")), arguments)
-                if budget is not None:
+                if budget is not None and not executor_manages_budget:
                     budget.record_tool_output(result)
             except ResearchBudgetExceeded:
                 raise
@@ -642,6 +654,13 @@ def ask_json_with_tools(system_prompt, messages, schema, tools, tool_executor,
                 "call_id": str(getattr(call, "call_id", "")),
                 "output": json.dumps(result, ensure_ascii=False),
             })
+            # A constrained executor may end the loop after a duplicate call
+            # or two no-progress operations.  Still return the normal tool
+            # output to the model transcript for observability, then make the
+            # caller build the compact final evidence packet.
+            stop_reason = result.get("_stop_reason") if isinstance(result, dict) else None
+            if stop_reason:
+                raise ResearchLoopFinished(str(stop_reason))
 
         if round_number == rounds - 1:
             raise ResearchLoopFinished("tool_budget")

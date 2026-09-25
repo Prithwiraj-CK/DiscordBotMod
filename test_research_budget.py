@@ -21,6 +21,31 @@ SCHEMA = {
 }
 
 
+def _plan(subquestion="Ratio % behavior"):
+    return {
+        "normalized_question": subquestion,
+        "subquestions": [{"subquestion": subquestion, "needed": "current Olympus behavior"}],
+    }
+
+
+def _draft(answer, evidence_id, subquestion="Ratio % behavior", complete=True):
+    return {
+        "action": "answer", "evidence_ids": [evidence_id],
+        "claim_evidence": [{"claim": answer, "evidence_ids": [evidence_id]}],
+        "missing_information": [], "draft_answer": answer,
+        "coverage": {
+            "complete": complete,
+            "uncovered_parts": [] if complete else ["missing Olympus behavior"],
+            "part_evidence": [{"part": subquestion, "evidence_ids": [evidence_id]}],
+        },
+        "coverage_ledger": [{
+            "subquestion": subquestion, "status": "covered" if complete else "missing",
+            "supporting_evidence_ids": [evidence_id] if complete else [],
+            "conflicts": [], "missing_items": [] if complete else ["missing Olympus behavior"],
+        }],
+    }
+
+
 def _usage(input_tokens, output_tokens=0, cached_tokens=0, reasoning_tokens=0):
     return {
         "input_tokens": input_tokens,
@@ -101,6 +126,7 @@ class ResearchBudgetTests(unittest.TestCase):
     def test_no_evidence_records_no_progress_and_hands_off(self):
         budget = llm.ResearchBudget()
         with patch("bot.ResearchBudget.from_environment", return_value=budget), \
+             patch("bot.ask_json", return_value=_plan()), \
              patch("bot.ask_json_with_tools", side_effect=llm.ResearchLoopFinished("complete")):
             result = autonomous_decision("In Olympus, what does Ratio % do?", [])
         self.assertEqual("escalate", result["action"])
@@ -133,28 +159,30 @@ class ResearchBudgetTests(unittest.TestCase):
         final_prompts = []
 
         def research(_system, _messages, _schema, _tools, executor, **_kwargs):
-            executor("search_approved_facts", {"product": "olympus", "query": "ratio", "intent": "unknown"})
-            executor("search_repository", {"product": "olympus", "query": "ratio", "limit": 8})
-            executor("read_repository_section", {"product": "olympus", "path": "wallet.ts", "line": 20})
+            executor("search_approved_facts", {"query": "ratio", "intent": "unknown"})
+            anchors = executor("search_repository", {"query": "ratio", "limit": 8})
+            executor("read_section", {"anchor_id": anchors["anchors"][0]["anchor_id"]})
             raise llm.ResearchLoopFinished("complete")
 
-        def final_writer(system, *_args, **_kwargs):
+        def final_writer(system, *_args, name="", **_kwargs):
+            if name == "support_luna_research_plan":
+                return _plan()
             final_prompts.append(system)
             answer = "Selected compact answer."
-            return {
-                "action": "answer", "evidence_ids": [section["id"]],
-                "claim_evidence": [{"claim": answer, "evidence_ids": [section["id"]]}],
-                "missing_information": [], "draft_answer": answer,
-                "coverage": {
-                    "complete": True,
-                    "uncovered_parts": [],
-                    "part_evidence": [{"part": "Ratio % behavior", "evidence_ids": [section["id"]]}],
-                },
-            }
+            return _draft(answer, section["id"])
+
+        class RepoTools:
+            def __init__(self, budget):
+                del budget
+            def execute(self, name, _arguments):
+                if name == "search_repository":
+                    return {"anchors": [{"anchor_id": "oa_wallet", "citable": False}]}
+                if name == "read_section":
+                    return {"evidence": {**section, "citable": True}}
+                return {"anchors": []}
 
         with patch("bot.retrieve_facts", return_value=[fact]), \
-             patch("bot.search_codebase", return_value=[anchor]), \
-             patch("bot.read_codebase_section", return_value=section), \
+             patch("bot.OlympusRepositoryTools", RepoTools), \
              patch("bot.ask_json_with_tools", side_effect=research), \
              patch("bot.ask_json", side_effect=final_writer):
             result = autonomous_decision("In Olympus, what does Ratio % do?", [])
@@ -172,45 +200,40 @@ class ResearchBudgetTests(unittest.TestCase):
         }
 
         def research(_system, _messages, _schema, _tools, executor, **_kwargs):
-            executor("search_approved_facts", {
-                "product": "olympus", "query": "wallet addresses", "intent": "wallets",
-            })
-            executor("search_repository", {
-                "product": "olympus", "query": "wallet addresses", "limit": 8,
-            })
-            executor("read_repository_section", {
-                "product": "olympus", "path": "wallet.ts", "line": 20,
-            })
-            return {
-                "action": "answer", "evidence_ids": [section["id"]],
-                "claim_evidence": [{
-                    "claim": "The signing address authorizes actions.",
-                    "evidence_ids": [section["id"]],
-                }],
-                "missing_information": [],
-                "draft_answer": "The signing address authorizes actions.",
-                "coverage": {
-                    "complete": False,
-                    "uncovered_parts": ["the distinct trading and deposit address roles"],
-                    "part_evidence": [{
-                        "part": "the signing address role",
-                        "evidence_ids": [section["id"]],
-                    }],
-                },
-            }
+            anchors = executor("search_repository", {"query": "wallet addresses", "limit": 8})
+            executor("read_section", {"anchor_id": anchors["anchors"][0]["anchor_id"]})
+            raise llm.ResearchLoopFinished("complete")
+
+        def planner_or_final(_system, _messages, _schema, name="", **_kwargs):
+            if name == "support_luna_research_plan":
+                return _plan("the signing, trading, and deposit address roles")
+            return _draft(
+                "The signing address authorizes actions.", section["id"],
+                "the signing, trading, and deposit address roles", complete=False,
+            )
+
+        class RepoTools:
+            def __init__(self, budget):
+                del budget
+            def execute(self, name, _arguments):
+                if name == "search_repository":
+                    return {"anchors": [{"anchor_id": "oa_wallet", "citable": False}]}
+                if name == "read_section":
+                    return {"evidence": {**section, "citable": True}}
+                return {"anchors": []}
 
         budget = llm.ResearchBudget(max_total_input_tokens=50_000)
         with patch("bot.ResearchBudget.from_environment", return_value=budget), \
              patch("bot.retrieve_facts", return_value=[]), \
-             patch("bot.search_codebase", return_value=[]), \
-             patch("bot.read_codebase_section", return_value=section), \
+             patch("bot.OlympusRepositoryTools", RepoTools), \
+             patch("bot.ask_json", side_effect=planner_or_final), \
              patch("bot.ask_json_with_tools", side_effect=research):
             result = autonomous_decision(
                 "Why does a new Olympus wallet have signing, trading, and deposit addresses?", [],
             )
         self.assertEqual("escalate", result["action"])
         self.assertEqual("no_progress", budget.stop_reason)
-        self.assertIn("the distinct trading and deposit address roles", result["missing_information"])
+        self.assertIn("missing Olympus behavior", result["missing_information"])
         self.assertGreater(budget.max_total_input_tokens - budget.input_tokens, 0)
 
 

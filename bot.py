@@ -54,6 +54,9 @@ from codebase_search import (
     _workflow_queries, codebase_prompt, read_codebase_context, read_codebase_file,
     read_codebase_section, search_codebase,
 )
+from olympus_repository_tools import (
+    OLYMPUS_REPOSITORY_TOOL_SCHEMAS, OlympusRepositoryTools,
+)
 from conversation_memory import ConversationMemory
 from knowledge import (
     history_prompt, load_knowledge, notes_prompt, retrieve_facts,
@@ -585,10 +588,54 @@ RESEARCH_DRAFT_SCHEMA = {
             },
             "required": ["complete", "uncovered_parts", "part_evidence"],
         },
+        "coverage_ledger": {
+            "type": "array",
+            "minItems": 1,
+            "maxItems": 8,
+            "items": {
+                "type": "object",
+                "additionalProperties": False,
+                "properties": {
+                    "subquestion": {"type": "string", "minLength": 1, "maxLength": 320},
+                    "status": {"type": "string", "enum": ["covered", "missing", "conflict"]},
+                    "supporting_evidence_ids": {
+                        "type": "array", "items": {"type": "string"}, "maxItems": 8,
+                    },
+                    "conflicts": {"type": "array", "items": {"type": "string"}, "maxItems": 6},
+                    "missing_items": {"type": "array", "items": {"type": "string"}, "maxItems": 6},
+                },
+                "required": [
+                    "subquestion", "status", "supporting_evidence_ids", "conflicts", "missing_items",
+                ],
+            },
+        },
     },
     "required": [
         "action", "evidence_ids", "claim_evidence", "missing_information", "draft_answer", "coverage",
+        "coverage_ledger",
     ],
+}
+
+# This is the private understand-question / plan-subquestions stage.  It does
+# not draft an answer and cannot bypass the evidence gate below.
+RESEARCH_PLAN_SCHEMA = {
+    "type": "object",
+    "additionalProperties": False,
+    "properties": {
+        "normalized_question": {"type": "string", "minLength": 1, "maxLength": 800},
+        "subquestions": {
+            "type": "array", "minItems": 1, "maxItems": 8,
+            "items": {
+                "type": "object", "additionalProperties": False,
+                "properties": {
+                    "subquestion": {"type": "string", "minLength": 1, "maxLength": 320},
+                    "needed": {"type": "string", "minLength": 1, "maxLength": 320},
+                },
+                "required": ["subquestion", "needed"],
+            },
+        },
+    },
+    "required": ["normalized_question", "subquestions"],
 }
 
 VALIDATION_SCHEMA = {
@@ -3392,94 +3439,25 @@ def _validate_luna_draft(query, product, feature, facts, draft, turns, calculati
     return corrected, failures
 
 
-# Luna receives these tools rather than a pre-ranked evidence packet.  The
-# functions below are intentionally read-only and root-confined: the model can
-# search and open product material, but can never execute a command, inspect a
-# secret, access Discord directly, or write into either repository.
-LUNA_RESEARCH_TOOLS = [
-    {
-        "type": "function",
-        "name": "search_repository",
-        "description": (
-            "Search the current Olympus repository by user wording, "
-            "feature terms, filenames, symbols, routes, commands, and documentation headings. "
-            "Use this before answering implementation or workflow questions."
-        ),
-        "parameters": {
-            "type": "object", "additionalProperties": False,
-            "properties": {
-                "product": {"type": "string", "enum": list(SUPPORTED_PRODUCTS)},
-                "query": {"type": "string", "minLength": 1, "maxLength": 320},
-                "limit": {"type": "integer", "minimum": 1, "maximum": 20},
-            },
-            "required": ["product", "query", "limit"],
-        },
-    },
-    {
-        "type": "function",
-        "name": "read_repository_section",
-        "description": (
-            "Read the complete relevant documentation heading, function, class, route, or workflow "
-            "around a repository search result. Use this to verify behavior; search snippets alone are not proof."
-        ),
-        "parameters": {
-            "type": "object", "additionalProperties": False,
-            "properties": {
-                "product": {"type": "string", "enum": list(SUPPORTED_PRODUCTS)},
-                "path": {"type": "string", "minLength": 1, "maxLength": 500},
-                "line": {"type": "integer", "minimum": 1, "maximum": 100000},
-            },
-            "required": ["product", "path", "line"],
-        },
-    },
-    {
-        "type": "function",
-        "name": "read_repository_file",
-        "description": (
-            "Read a bounded explicit line range when a complete function or workflow spans more than one section."
-        ),
-        "parameters": {
-            "type": "object", "additionalProperties": False,
-            "properties": {
-                "product": {"type": "string", "enum": list(SUPPORTED_PRODUCTS)},
-                "path": {"type": "string", "minLength": 1, "maxLength": 500},
-                "start_line": {"type": "integer", "minimum": 1, "maximum": 100000},
-                "end_line": {"type": "integer", "minimum": 1, "maximum": 100000},
-            },
-            "required": ["product", "path", "start_line", "end_line"],
-        },
-    },
+# Luna receives only these Olympus-confined tools.  Search results are opaque
+# discovery anchors; the model must open a citable section before it can make
+# a repository claim.  The one non-repository tool is the approved-fact index,
+# which remains authoritative for policy, fees, privacy and security claims.
+LUNA_RESEARCH_TOOLS = list(OLYMPUS_REPOSITORY_TOOL_SCHEMAS) + [
     {
         "type": "function",
         "name": "search_approved_facts",
         "description": (
-            "Search verified product facts. Use this for fees, security, privacy, product promises, and official policy. "
+            "Search verified Olympus facts for fees, security, privacy, product promises, and official policy. "
             "These facts outrank repository inference when they conflict."
         ),
         "parameters": {
             "type": "object", "additionalProperties": False,
             "properties": {
-                "product": {"type": "string", "enum": list(SUPPORTED_PRODUCTS)},
                 "query": {"type": "string", "minLength": 1, "maxLength": 320},
                 "intent": {"type": "string", "maxLength": 80},
             },
-            "required": ["product", "query", "intent"],
-        },
-    },
-    {
-        "type": "function",
-        "name": "search_staff_examples",
-        "description": (
-            "Search past staff replies only to resolve product terminology or learn a helpful support style. "
-            "Never cite or treat these examples as proof of current product behavior."
-        ),
-        "parameters": {
-            "type": "object", "additionalProperties": False,
-            "properties": {
-                "product": {"type": "string", "enum": list(SUPPORTED_PRODUCTS)},
-                "query": {"type": "string", "minLength": 1, "maxLength": 320},
-            },
-            "required": ["product", "query"],
+            "required": ["query", "intent"],
         },
     },
 ]
@@ -3487,15 +3465,21 @@ LUNA_RESEARCH_TOOLS = [
 LUNA_TOOL_RESEARCH_SYSTEM = LUNA_SUPPORT_SYSTEM + """
 
 RESEARCH WORKFLOW
-You are the final support researcher and writer. Your research is internal.
-For every factual Olympus question, use this exact state machine:
-(1) discover: search approved facts and the relevant repository; (2) read: open
-the one or two strongest complete sections; (3) assess whether those sections
-cover every part of the question; (4) answer. Interpret shared product terms
-inside Olympus unless the user explicitly names another product. Do not make
-the user choose when surrounding context or research resolves it. If the
-material genuinely lacks a required part, use the
-remaining permitted discovery/read call specifically for that gap.
+You are an Olympus-only support investigator. Your research is internal and
+bounded by the supplied tools. Follow this adaptive state machine:
+
+1. understand_question: identify the latest question and relevant conversation context.
+2. plan_subquestions: use the private research plan supplied by the application.
+3. discover: search exact labels/phrases, repository concepts, symbols, or approved facts.
+4. inspect: read complete citable sections; follow references, callers, tests, docs, and UI-to-backend paths when they answer a missing subquestion.
+5. verify_coverage: stop calling tools once every planned subquestion has citable support. If a search is weak, reformulate it from what you learned instead of repeating it.
+6. finalize_or_abstain: return no more tool calls when coverage is ready. The application will draft from a fresh compact evidence packet. If the required material is missing or conflicting, stop rather than guessing.
+
+Search anchors are not proof. Read a complete citable repository section
+before asserting repository behavior. Do not repeat the same normalized tool
+call. Do not keep searching after two operations add no useful anchors or
+citable evidence. Interpret shared terms inside Olympus unless the user
+explicitly names another product.
 
 Do not mention code, files, repository searches, sources, evidence, citations,
 or uncertainty about what you found in the user-facing answer. Reply like a
@@ -3508,17 +3492,8 @@ read tool. Search-result IDs alone are anchors, not proof: read the relevant
 section before citing a repository claim. Stored conversation context may help
 route the question but must never be cited as proof.
 
-Before returning a final answer, populate `coverage.part_evidence` with every
-distinct factual, operational, conditional, or comparison part the user asked
-about, and attach selected evidence IDs to each part. Mark `coverage.complete`
-true only when every part is covered. If any required part is not covered by
-the selected packet, list it in `coverage.uncovered_parts`, mark complete
-false, and choose action=escalate. Never fill in a gap from general knowledge
-or a search-result preview.
-
-There are at most two discovery calls and two read calls. After them, assess
-coverage and return the final JSON answer; do not keep searching. Only use a
-short handoff for an account-specific/security incident or incomplete evidence.
+The final answer is produced separately. Do not write an answer in this tool
+loop. Never treat conversation history or search previews as factual proof.
 """
 
 
@@ -3570,7 +3545,7 @@ def _final_evidence_packet(evidence, max_items):
     return selected[:max(0, int(max_items))]
 
 
-def _coverage_failures(draft, valid_ids, factual_question):
+def _coverage_failures(draft, valid_ids, factual_question, planned_subquestions=()):
     """Return mechanical coverage failures for a researched final answer.
 
     Luna identifies the semantic parts of a natural-language question, while
@@ -3582,14 +3557,6 @@ def _coverage_failures(draft, valid_ids, factual_question):
         return []
     action = str(draft.get("action") or "")
     coverage = draft.get("coverage")
-    # An explicit incomplete assessment is authoritative for *any* response
-    # action.  In particular, it must win over the old generic-question retry
-    # rule when Luna has already determined that the selected packet is not
-    # sufficient to answer safely.
-    if isinstance(coverage, dict) and (
-        coverage.get("complete") is not True or coverage.get("uncovered_parts")
-    ):
-        return ["Selected evidence does not cover every part of the question."]
     if action != "answer":
         return []
     if not isinstance(coverage, dict):
@@ -3614,6 +3581,33 @@ def _coverage_failures(draft, valid_ids, factual_question):
             failures.append("A question part had no selected evidence.")
         elif not evidence_ids.issubset(valid_ids):
             failures.append("A question part cited evidence outside the selected packet.")
+    ledger = draft.get("coverage_ledger")
+    if not isinstance(ledger, list) or not ledger:
+        failures.append("The final answer did not return a coverage ledger.")
+        ledger = []
+    expected = {str(value).strip() for value in planned_subquestions if str(value).strip()}
+    covered = set()
+    for entry in ledger:
+        if not isinstance(entry, dict):
+            failures.append("The final answer returned an invalid coverage-ledger entry.")
+            continue
+        subquestion = str(entry.get("subquestion") or "").strip()
+        status = str(entry.get("status") or "")
+        evidence_ids = {str(value) for value in entry.get("supporting_evidence_ids") or [] if value}
+        conflicts = entry.get("conflicts") or []
+        missing_items = entry.get("missing_items") or []
+        if not subquestion or status not in {"covered", "missing", "conflict"}:
+            failures.append("The final answer returned an invalid coverage-ledger entry.")
+            continue
+        if status != "covered" or conflicts or missing_items:
+            failures.append("A planned subquestion is incomplete or conflicting.")
+            continue
+        if not evidence_ids or not evidence_ids.issubset(valid_ids):
+            failures.append("A coverage-ledger subquestion lacked selected citable evidence.")
+            continue
+        covered.add(subquestion)
+    if expected and not expected.issubset(covered):
+        failures.append("The coverage ledger did not cover every planned subquestion.")
     return list(dict.fromkeys(failures))
 
 
@@ -3637,13 +3631,74 @@ def _deterministic_research_failures(query, draft, valid_ids, factual_question):
         failures.append("The answer cited evidence outside this research session.")
     if factual_question and action == "answer" and not used_ids:
         failures.append("A factual answer needs evidence from this research session.")
-    if factual_question and action == "escalate" and not _requires_account_handoff(query):
-        failures.append("A general product question must be answered, not handed off.")
     return failures, used_ids
 
 
+def _research_plan(question, turns):
+    """Understand the question and split it into private evidence needs."""
+    prompt = LUNA_SUPPORT_SYSTEM + """
+
+PRIVATE RESEARCH PLANNING ONLY
+Do not answer the user. Understand the latest Olympus support question in its
+conversation context, then return a small list of distinct factual or
+operational subquestions that must be supported before a complete answer is
+safe. Keep each subquestion concrete. Do not invent product behavior.
+"""
+    return ask_json(
+        prompt,
+        turns,
+        RESEARCH_PLAN_SCHEMA,
+        name="support_luna_research_plan",
+        temperature=0.0,
+    )
+
+
+def _initial_coverage_ledger(plan):
+    """Make coverage state explicit without treating search anchors as proof."""
+    entries = []
+    for item in plan.get("subquestions") or []:
+        subquestion = str(item.get("subquestion") or "").strip()
+        needed = str(item.get("needed") or "").strip()
+        if subquestion:
+            entries.append({
+                "subquestion": subquestion,
+                "status": "missing",
+                "supporting_evidence_ids": [],
+                "conflicts": [],
+                "missing_items": [needed] if needed else [subquestion],
+            })
+    return entries
+
+
+def _normalized_tool_call(name, arguments):
+    """Stable duplicate detection for model tool calls."""
+    try:
+        encoded = json.dumps(arguments or {}, sort_keys=True, ensure_ascii=False, separators=(",", ":"))
+    except (TypeError, ValueError):
+        encoded = repr(arguments)
+    return "{}:{}".format(str(name), encoded.casefold().strip())
+
+
+def _repository_tool_evidence(result, product):
+    """Extract only complete citable sections from a safe tool response."""
+    values = []
+    if not isinstance(result, dict):
+        return values
+    for key in ("evidence", "sections"):
+        raw = result.get(key)
+        candidates = raw if isinstance(raw, list) else [raw]
+        for item in candidates:
+            if not isinstance(item, dict) or item.get("citable") is not True:
+                continue
+            evidence_id = str(item.get("id") or "")
+            if not evidence_id:
+                continue
+            values.append({**item, "product": product, "citable": True})
+    return values
+
+
 def _luna_tool_research_decision(query, turns, product_hint=None, force_reply=False):
-    """Run one bounded discover → read → assess → answer investigation."""
+    """Run a budgeted adaptive Olympus investigation and compact final draft."""
     if force_reply and _is_social_smalltalk(query):
         social_product = product_hint if is_supported_product(product_hint) else "generic"
         return _decision("answer", social_product, "social", _social_reply(query), confidence=1.0)
@@ -3662,7 +3717,6 @@ def _luna_tool_research_decision(query, turns, product_hint=None, force_reply=Fa
     product = live_scope["product"]
     intent = _intent_hint(resolved_query) or "unknown"
     collected = OrderedDict()
-    research_state = {"discoveries": 0, "reads": 0}
     budget = current_research_budget()
     if budget is None:
         raise RuntimeError("live research requires an active ResearchBudget")
@@ -3682,66 +3736,6 @@ def _luna_tool_research_decision(query, turns, product_hint=None, force_reply=Fa
             collected[str(item["id"])] = item
         return selected
 
-    def execute_tool(name, arguments):
-        requested_product = str(arguments.get("product") or "").lower()
-        if requested_product != product or not is_supported_product(requested_product):
-            return {"error": "This live support session is limited to {}.".format(product)}
-        selected_product = product
-        tool_query = str(arguments.get("query") or resolved_query).strip()[:320]
-        discovery_order = ("search_approved_facts", "search_repository")
-        if research_state["discoveries"] < len(discovery_order):
-            required = discovery_order[research_state["discoveries"]]
-            if name != required:
-                return {
-                    "error": "Discovery stage {} requires {} next. Do not read or search anything else yet."
-                    .format(research_state["discoveries"] + 1, required)
-                }
-        elif name in discovery_order or name == "search_staff_examples":
-            return {"error": "Discovery is complete. Read the strongest collected section or return the final answer."}
-        if name == "search_repository":
-            research_state["discoveries"] += 1
-            hits = search_codebase(tool_query, selected_product, limit=min(20, max(1, int(arguments.get("limit", 12)))))
-            return {"results": [_repository_anchor_payload(item) for item in hits[:8]]}
-        if name == "read_repository_section":
-            if research_state["reads"] >= 2:
-                return {"error": "Read phase is complete. Assess the collected evidence and return the final answer."}
-            research_state["reads"] += 1
-            item = read_codebase_section(
-                selected_product, str(arguments.get("path") or ""), int(arguments.get("line", 1)),
-                max_tokens=min(2400, max(1, budget.remaining_tool_output_tokens())),
-            )
-            if item and remember([item]):
-                return {"result": _tool_evidence_payload(item)}
-            return {"error": "That repository section was not available."}
-        if name == "read_repository_file":
-            if research_state["reads"] >= 2:
-                return {"error": "Read phase is complete. Assess the collected evidence and return the final answer."}
-            research_state["reads"] += 1
-            start = int(arguments.get("start_line", 1))
-            end = int(arguments.get("end_line", start))
-            if end < start or end - start > 249:
-                return {"error": "Choose a valid bounded range of at most 250 lines."}
-            item = read_codebase_file(
-                selected_product, str(arguments.get("path") or ""), start, end,
-                max_tokens=min(2400, max(1, budget.remaining_tool_output_tokens())),
-            )
-            if item and remember([item]):
-                return {"result": _tool_evidence_payload(item)}
-            return {"error": "That repository range was not available."}
-        if name == "search_approved_facts":
-            research_state["discoveries"] += 1
-            if not APPROVED_FACTS_ENABLED:
-                return {"results": [], "notice": "Approved facts are currently disabled."}
-            facts = retrieve_facts(
-                tool_query, product=selected_product,
-                intent=str(arguments.get("intent") or intent),
-                limit=min(4, budget.remaining_evidence_items()),
-            )
-            return {"results": [_tool_evidence_payload(item) for item in remember(facts)]}
-        if name == "search_staff_examples":
-            return {"error": "Staff-history search is not part of this answer workflow. Use the current conversation for context."}
-        return {"error": "Unknown research tool."}
-
     factual_question = _asks_something(resolved_query) and not _is_social_smalltalk(resolved_query)
     base_prompt = (
         "CURRENT USER QUESTION:\n{}\n\nRESOLVED CONVERSATION QUESTION:\n{}\n"
@@ -3749,29 +3743,96 @@ def _luna_tool_research_decision(query, turns, product_hint=None, force_reply=Fa
         "Use the conversation only to understand context; the latest question is the task."
     ).format(query, resolved_query, product or "unknown", intent)
     agent_turns = list(context_turns) + [{"role": "user", "content": base_prompt}]
-    # This is deliberately not environment-configurable: the state machine is
-    # exactly two discovery calls plus two complete reads. Drafting happens
-    # separately from a fresh, compact evidence packet.
-    max_rounds = 4
+    if not factual_question:
+        return _decision("clarify", product, intent, "What would you like help with?", confidence=0.5)
+    try:
+        plan = _research_plan(resolved_query, agent_turns)
+    except ResearchBudgetExceeded:
+        raise
+    except Exception as exc:
+        budget.note_stop("failure")
+        log.warning("Luna research planning unavailable: %s", exc)
+        return _decision("escalate", product, intent, ESCALATE, confidence=0.0)
+    coverage_ledger = _initial_coverage_ledger(plan)
+    if not coverage_ledger:
+        budget.note_stop("failure")
+        return _decision("escalate", product, intent, ESCALATE, confidence=0.0)
+    repository_tools = OlympusRepositoryTools(budget)
+    seen_calls = set()
+    seen_anchors = set()
+    no_progress = 0
+
+    def execute_tool(name, arguments):
+        """Expose adaptive safe tools and stop deterministically on no progress."""
+        nonlocal no_progress
+        signature = _normalized_tool_call(name, arguments)
+        if signature in seen_calls:
+            return {"error": "duplicate_research_operation", "_stop_reason": "no_progress"}
+        seen_calls.add(signature)
+        if name == "search_approved_facts":
+            budget.reserve_tool_call(name)
+            tool_query = str(arguments.get("query") or resolved_query).strip()[:320]
+            if APPROVED_FACTS_ENABLED:
+                facts = retrieve_facts(
+                    tool_query, product=product,
+                    intent=str(arguments.get("intent") or intent),
+                    limit=min(4, budget.remaining_evidence_items()),
+                )
+                selected = remember(facts)
+            else:
+                selected = []
+            result = {
+                "status": "ok", "results": [_tool_evidence_payload(item) for item in selected],
+                "metadata": {"untrusted_repository_data": False},
+            }
+            budget.record_tool_output(result)
+            made_progress = bool(selected)
+        else:
+            result = repository_tools.execute(name, arguments)
+            if isinstance(result, dict) and result.get("error") == "budget_exhausted":
+                return {**result, "_stop_reason": "token_budget"}
+            anchors = result.get("anchors") or [] if isinstance(result, dict) else []
+            fresh_anchors = {
+                str(item.get("anchor_id") or "") for item in anchors if isinstance(item, dict)
+            } - seen_anchors
+            seen_anchors.update(fresh_anchors)
+            selected = remember(_repository_tool_evidence(result, product))
+            made_progress = bool(fresh_anchors or selected)
+        if made_progress:
+            no_progress = 0
+        else:
+            no_progress += 1
+        state = {
+            "state": "inspect" if seen_anchors else "discover",
+            "coverage_ledger": coverage_ledger,
+            "selected_evidence_ids": list(collected),
+        }
+        if isinstance(result, dict):
+            result = {**result, "research_state": state}
+        if no_progress >= 2:
+            result = {**result, "_stop_reason": "no_progress"}
+        return result
 
     def final_from_collected_evidence(instruction):
         """Draft from a new packet, never the raw tool-loop transcript."""
-        evidence = _final_evidence_packet(
-            list(collected.values()), budget.max_evidence_items,
-        )
+        evidence = _final_evidence_packet(list(collected.values()), budget.max_evidence_items)
         if not evidence:
             budget.note_stop("no_progress", replace=True)
             return None
         try:
+            final_context = json.dumps({
+                "research_states": ["understand_question", "plan_subquestions", "discover", "inspect", "verify_coverage", "finalize_or_abstain"],
+                "planned_subquestions": coverage_ledger,
+            }, ensure_ascii=False)
             return ask_json(
-                LUNA_SUPPORT_SYSTEM + _evidence_text(evidence) + "\n\nFINAL ANSWER REQUIRED\n"
-                + instruction
-                + " Return action=answer only when the selected evidence covers every part of the question; "
-                "otherwise return action=escalate. "
+                LUNA_SUPPORT_SYSTEM + _evidence_text(evidence) + "\n\nPRIVATE RESEARCH PLAN AND LEDGER\n"
+                + final_context + "\n\nFINAL ANSWER REQUIRED\n" + instruction
+                + " Return action=answer only when every planned subquestion is covered by selected citable evidence. "
+                "Populate both coverage and coverage_ledger. If coverage is incomplete or conflicting, choose clarify or escalate. "
                 "Do not mention research, code, files, or evidence to the user. Cite only supplied IDs.",
                 agent_turns,
                 RESEARCH_DRAFT_SCHEMA,
-                name="support_luna_research_finalization",
+            name="support_luna_research_finalization",
                 temperature=0.0,
             )
         except ResearchBudgetExceeded:
@@ -3789,8 +3850,9 @@ def _luna_tool_research_decision(query, turns, product_hint=None, force_reply=Fa
             LUNA_RESEARCH_TOOLS,
             execute_tool,
             name="support_luna_tool_research",
-            max_tool_rounds=max_rounds,
+            max_tool_rounds=budget.max_tool_calls,
             require_initial_tool=factual_question,
+            executor_manages_budget=True,
         )
     except ResearchLoopFinished as stopped:
         budget.note_stop(stopped.reason)
@@ -3816,11 +3878,13 @@ def _luna_tool_research_decision(query, turns, product_hint=None, force_reply=Fa
         action = "clarify"
     evidence = _final_evidence_packet(list(collected.values()), budget.max_evidence_items)
     valid_ids = {str(item.get("id") or "") for item in evidence}
-    coverage_failures = _coverage_failures(draft, valid_ids, factual_question)
+    planned_subquestions = [entry["subquestion"] for entry in coverage_ledger]
+    coverage_failures = _coverage_failures(draft, valid_ids, factual_question, planned_subquestions)
     if coverage_failures:
         coverage = draft.get("coverage") if isinstance(draft.get("coverage"), dict) else {}
         missing = [str(value) for value in coverage.get("uncovered_parts") or [] if str(value).strip()]
-        budget.note_stop("no_progress", replace=True)
+        if budget.stop_reason == "complete":
+            budget.note_stop("no_progress", replace=True)
         return _decision(
             "escalate", product or "unknown", intent, ESCALATE,
             evidence_ids=valid_ids,
@@ -3830,20 +3894,8 @@ def _luna_tool_research_decision(query, turns, product_hint=None, force_reply=Fa
         )
     failures, used_ids = _deterministic_research_failures(query, draft, valid_ids, factual_question)
     answer = str(draft.get("draft_answer") or "").strip()
-    if failures and evidence:
-        # Completion is a synthesis retry, never a fresh open-ended research
-        # pass. A normal product question must not become a handoff merely
-        # because the model exhausted its already-completed tool budget.
-        log.info("Luna tool-loop finalization requires correction: %s", failures)
-        finalized = final_from_collected_evidence("Fix this issue: {}.".format("; ".join(failures)))
-        if finalized is not None:
-            draft = finalized
-            action = str(draft.get("action") or "")
-            failures, used_ids = _deterministic_research_failures(query, draft, valid_ids, factual_question)
-            answer = str(draft.get("draft_answer") or "").strip()
-
     if not failures:
-        budget.note_stop("complete")
+        budget.note_stop("complete", replace=True)
         if action == "ignore":
             return _decision("ignore", product or "generic", intent, IGNORE, confidence=0.8)
         if action == "escalate":

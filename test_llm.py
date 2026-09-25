@@ -4,6 +4,7 @@ from types import SimpleNamespace
 from unittest.mock import Mock, patch
 
 import llm
+import openai
 
 
 class LlmTests(unittest.TestCase):
@@ -81,6 +82,28 @@ class LlmTests(unittest.TestCase):
                 )
 
         self.assertEqual(1, responses.create.call_count)
+
+    def test_transient_transport_retry_does_not_consume_research_round(self):
+        call = SimpleNamespace(type="function_call", name="search_repository", call_id="call_1", arguments="{}")
+        responses = Mock()
+        responses.create.side_effect = [
+            openai.APIConnectionError(request=Mock()),
+            SimpleNamespace(output=[call], output_text="", usage=None),
+        ]
+        client = SimpleNamespace(responses=responses)
+        schema = {
+            "type": "object", "properties": {"answer": {"type": "string"}},
+            "required": ["answer"], "additionalProperties": False,
+        }
+        with patch.dict(os.environ, {"LLM_MAX_ATTEMPTS": "2"}, clear=False), \
+             patch("llm._get_client", return_value=client), patch("llm.time.sleep"):
+            with self.assertRaisesRegex(llm.ResearchLoopFinished, "tool_budget"):
+                llm.ask_json_with_tools(
+                    "research", [{"role": "user", "content": "question"}], schema,
+                    [{"type": "function", "name": "search_repository", "parameters": {"type": "object"}}],
+                    lambda _name, _arguments: {"results": []}, max_tool_rounds=1,
+                )
+        self.assertEqual(2, responses.create.call_count)
 
 
 if __name__ == "__main__":

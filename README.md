@@ -175,10 +175,13 @@ image text is untrusted context and cannot override approved facts.
 If `CODEBASE_OLYMPUS_PATH` is configured and `CODEBASE_SEARCH_ENABLED=true`,
 Olympus product and workflow questions also investigate that repository
 locally. This is a separate opt-in because the selected excerpts are sent to
-OpenAI as model context. Research is read-only: semantic
-query expansion, keyword search, filename/symbol/route/command/heading search,
-one-hop local-reference following, complete bounded function/section reads,
-and one bounded evidence-review pass are used. It excludes dependencies,
+OpenAI as model context. Research is read-only and adaptive: Luna first plans
+the factual parts of the question, then can reformulate a weak search, follow
+references/callers/tests, and inspect complete bounded functions or
+documentation sections until its coverage ledger is complete. It stops early
+once every planned part has citable support, or safely hands off on an
+incomplete/conflicting ledger, repeated/no-progress work, or a budget limit.
+It excludes dependencies,
 generated files, logs/dumps/backups, binary assets, and secret-shaped files,
 and redacts sensitive-looking values. The model has no shell or filesystem-write
 tool. Code excerpts can explain exact implementation behavior; when enabled,
@@ -203,8 +206,8 @@ verified public-policy facts such as fees or product promises.
 
 ### Olympus repository investigation tools
 
-`olympus_repository_tools.py` provides an Olympus-only, read-only tool session
-for a future expanded Luna research loop. Search calls issue opaque per-session
+`olympus_repository_tools.py` provides the live Olympus-only, read-only tool
+session used by Luna's adaptive research loop. Search calls issue opaque per-session
 anchor IDs; section, caller, reference, and test reads dereference only those
 issued IDs, never model-supplied filesystem paths. Every response carries
 size/token metadata and emits a privacy-safe trace without question or source
@@ -218,7 +221,8 @@ commands. `run_allowlisted_test` recognises only hard-coded command IDs, but
 currently returns `test_execution_unavailable`: this runtime has no OS-level
 sandbox that can safely execute untrusted repository test code without allowing
 writes or network access. It intentionally does not fall back to a local shell.
-These tools are not registered in the live agent loop yet.
+The tools are registered only for the Olympus support path; they cannot search
+or read Valhalla.
 
 ## How it works
 
@@ -229,13 +233,13 @@ message in an allowed channel
   → retain at least the current user's five previous messages
   → tagged images transcribed once as untrusted context
   → Olympus-only product scope and deterministic Valhalla handoff
-  → bounded semantic/keyword repository discovery with compact anchors
-  → bounded section reads and selected compact evidence packet
+  → understand question and plan private factual subquestions
+  → adaptive Olympus-only discovery with compact opaque anchors
+  → inspect citable sections; optionally follow references, callers, and tests
   → per-turn token, tool, evidence, and wall-clock budget
-  → follow local references and read complete bounded functions or documentation sections
   → retrieve approved facts and current code as evidence; Markdown and old staff replies remain background only
-  → one bounded evidence review can follow missing references or synonyms
-  → Luna makes the final action and answer, maps each factual claim to current evidence, and validates it once
+  → verify a coverage ledger for every planned subquestion
+  → Luna drafts from a fresh compact selected-evidence packet, or clarifies/hands off safely
   → shadow proposal in the configured output channel, or autonomous handoff proposal
 ```
 

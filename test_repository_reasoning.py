@@ -23,7 +23,7 @@ QUESTION = (
 
 
 class RepositoryReasoningTests(unittest.TestCase):
-    def test_general_product_question_cannot_escalate_after_research(self):
+    def test_incomplete_general_product_question_may_handoff_after_research(self):
         draft = {
             "action": "escalate", "evidence_ids": ["repo.wallet.section"],
             "claim_evidence": [], "draft_answer": "",
@@ -32,7 +32,7 @@ class RepositoryReasoningTests(unittest.TestCase):
             "Why does a new Olympus wallet have signing and trading addresses?",
             draft, {"repo.wallet.section"}, factual_question=True,
         )
-        self.assertIn("A general product question must be answered, not handed off.", failures)
+        self.assertEqual([], failures)
 
     def test_deterministic_gate_accepts_grounded_general_answer(self):
         draft = {
@@ -259,31 +259,7 @@ class RepositoryReasoningTests(unittest.TestCase):
         self.assertEqual(("olympus", "valhalla"), _repository_products("olympus", "redeemed"))
         self.assertEqual(("valhalla", "olympus"), _repository_products("valhalla", "copy ratio"))
 
-    @patch("bot._review_evidence")
-    @patch("bot._plan_searches", return_value=[])
-    @patch("bot.retrieve_history")
-    @patch("bot.retrieve_notes", return_value=[])
-    @patch("bot.retrieve_facts", return_value=[])
-    @patch("bot.read_codebase_section")
-    @patch("bot.search_codebase")
-    @patch("bot.ask_json_with_tools")
-    @patch("bot.ask_json")
-    @patch("bot.CODEBASE_SEARCH_ENABLED", True)
-    @patch("bot.APPROVED_FACTS_ENABLED", False)
-    @patch("bot.REPOSITORY_SEARCH_BOTH", True)
-    def test_luna_pipeline_does_not_post_a_loose_staff_reply(
-        self,
-        mocked_ask,
-        mocked_agent,
-        mocked_search,
-        mocked_read,
-        mocked_facts,
-        mocked_notes,
-        mocked_history,
-        mocked_plan,
-        mocked_review,
-    ):
-        del mocked_facts, mocked_notes, mocked_plan
+    def test_luna_pipeline_does_not_post_a_loose_staff_reply(self):
         question = (
             "Does the lead wallet need to enter the pool before the copying "
             "wallet opens its position?"
@@ -300,35 +276,15 @@ class RepositoryReasoningTests(unittest.TestCase):
                 "then processUserForCopyTrade enqueues each follower's copy job."
             ),
         }
-        mocked_search.side_effect = lambda query, product, limit=28: [source] if product == "olympus" else []
-        mocked_read.return_value = source
-        mocked_history.return_value = [{
-            "id": "bad-old-answer",
-            "is_staff": True,
-            "channel_name": "general",
-            "question_context": "copy wallet pool lead wallet",
-            "content": "close that position, doesnt stop copying the wallet",
-        }]
-        mocked_review.return_value = {
-            "needs_more_search": False,
-            "follow_up_searches": [],
-            "read_evidence_ids": [],
-            "read_files": [],
-        }
-
-        def model_result(system_prompt, messages, schema, name="structured_response", temperature=0.2):
-            del system_prompt, messages, schema, temperature
-            if name == "support_luna_validation":
+        def model_result(_system_prompt, _messages, _schema, name="structured_response", **_kwargs):
+            if name == "support_luna_research_plan":
                 return {
-                    "supported": True,
-                    "answers_question": True,
-                    "wrong_product_or_feature": False,
-                    "incorrect_arithmetic": False,
-                    "unnecessary_clarification": False,
-                    "unsupported_claims": [],
-                    "forbidden_claims": [],
+                    "normalized_question": question,
+                    "subquestions": [{
+                        "subquestion": "whether the lead wallet is processed before the copied position",
+                        "needed": "current copy order",
+                    }],
                 }
-            self.assertEqual("support_luna_final", name)
             answer = (
                 "The lead wallet transaction is processed first. Olympus then "
                 "queues the copying wallet's position from that observed event."
@@ -347,53 +303,44 @@ class RepositoryReasoningTests(unittest.TestCase):
                         "evidence_ids": [source["id"]],
                     }],
                 },
+                "coverage_ledger": [{
+                    "subquestion": "whether the lead wallet is processed before the copied position",
+                    "status": "covered", "supporting_evidence_ids": [source["id"]],
+                    "conflicts": [], "missing_items": [],
+                }],
             }
-
-        mocked_ask.side_effect = model_result
 
         def agent_result(system_prompt, messages, schema, tools, executor, **kwargs):
             del system_prompt, messages, schema, tools, kwargs
-            facts_result = executor("search_approved_facts", {
-                "product": "olympus", "query": question, "intent": "unknown",
-            })
-            self.assertEqual([], facts_result["results"])
-            tool_result = executor("search_repository", {
-                "product": "olympus", "query": question, "limit": 8,
-            })
-            self.assertTrue(tool_result["results"])
-            executor("read_repository_section", {
-                "product": "olympus", "path": source["path"], "line": source["line"],
-            })
-            answer = (
-                "The lead wallet transaction is processed first. Olympus then "
-                "queues the copying wallet's position from that observed event."
-            )
-            return {
-                "action": "answer", "evidence_ids": [source["id"]],
-                "claim_evidence": [{"claim": answer, "evidence_ids": [source["id"]]}],
-                "missing_information": [], "draft_answer": answer,
-                "coverage": {
-                    "complete": True,
-                    "uncovered_parts": [],
-                    "part_evidence": [{
-                        "part": "whether the lead wallet is processed before the copied position",
-                        "evidence_ids": [source["id"]],
-                    }],
-                },
-            }
+            tool_result = executor("search_repository", {"query": question, "limit": 8})
+            self.assertTrue(tool_result["anchors"])
+            executor("read_section", {"anchor_id": tool_result["anchors"][0]["anchor_id"]})
+            from llm import ResearchLoopFinished
+            raise ResearchLoopFinished("complete")
 
-        mocked_agent.side_effect = agent_result
+        class RepoTools:
+            def __init__(self, budget):
+                del budget
+            def execute(self, name, _arguments):
+                if name == "search_repository":
+                    return {"anchors": [{"anchor_id": "oa_copy", "citable": False}]}
+                if name == "read_section":
+                    return {"evidence": {**source, "citable": True}}
+                return {"anchors": []}
         turns = [
             {"role": "user", "content": "Billi: older question {}".format(index)}
             for index in range(5)
         ] + [{"role": "user", "content": "Billi: " + question}]
 
-        result = autonomous_decision(question, turns, force_reply=True)
+        with patch("bot.APPROVED_FACTS_ENABLED", False), \
+             patch("bot.OlympusRepositoryTools", RepoTools), \
+             patch("bot.ask_json", side_effect=model_result), \
+             patch("bot.ask_json_with_tools", side_effect=agent_result):
+            result = autonomous_decision(question, turns, force_reply=True)
 
         self.assertEqual("answer", result["action"])
         self.assertIn("processed first", result["draft_answer"])
         self.assertNotIn("close that position", result["draft_answer"])
-        self.assertEqual(1, mocked_agent.call_count)
 
 
 if __name__ == "__main__":

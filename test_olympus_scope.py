@@ -39,48 +39,61 @@ OLYMPUS_SECTION = {
 
 
 class OlympusScopeTests(unittest.TestCase):
+    @staticmethod
+    def _plan():
+        return {
+            "normalized_question": "Olympus support question",
+            "subquestions": [{"subquestion": "the Olympus support question", "needed": "current Olympus behavior"}],
+        }
+
+    @staticmethod
+    def _draft(answer, evidence_id):
+        return {
+            "action": "answer", "evidence_ids": [evidence_id],
+            "claim_evidence": [{"claim": answer, "evidence_ids": [evidence_id]}],
+            "missing_information": [], "draft_answer": answer,
+            "coverage": {
+                "complete": True, "uncovered_parts": [],
+                "part_evidence": [{"part": "the Olympus support question", "evidence_ids": [evidence_id]}],
+            },
+            "coverage_ledger": [{
+                "subquestion": "the Olympus support question", "status": "covered",
+                "supporting_evidence_ids": [evidence_id], "conflicts": [], "missing_items": [],
+            }],
+        }
+
     def _grounded_agent(self, observed_products):
         def agent(_system, _messages, _schema, _tools, executor, **_kwargs):
-            facts = executor("search_approved_facts", {
-                "product": "olympus", "query": "question", "intent": "unknown",
-            })
+            facts = executor("search_approved_facts", {"query": "question", "intent": "unknown"})
             observed_products.append("olympus")
             self.assertEqual([OLYMPUS_FACT["id"]], [item["id"] for item in facts["results"]])
-            hits = executor("search_repository", {
-                "product": "olympus", "query": "question", "limit": 8,
-            })
+            hits = executor("search_repository", {"query": "question", "limit": 8})
             observed_products.append("olympus")
-            self.assertEqual([OLYMPUS_SEARCH["id"]], [item["id"] for item in hits["results"]])
-            section = executor("read_repository_section", {
-                "product": "olympus", "path": "wallet.ts", "line": 20,
-            })
+            self.assertTrue(hits["anchors"])
+            section = executor("read_section", {"anchor_id": hits["anchors"][0]["anchor_id"]})
             observed_products.append("olympus")
-            self.assertEqual(OLYMPUS_SECTION["id"], section["result"]["id"])
-            answer = "Olympus support answer."
-            return {
-                "action": "answer",
-                "evidence_ids": [OLYMPUS_SECTION["id"]],
-                "claim_evidence": [{
-                    "claim": answer, "evidence_ids": [OLYMPUS_SECTION["id"]],
-                }],
-                "missing_information": [],
-                "draft_answer": answer,
-                "coverage": {
-                    "complete": True,
-                    "uncovered_parts": [],
-                    "part_evidence": [{
-                        "part": "the user's Olympus support question",
-                        "evidence_ids": [OLYMPUS_SECTION["id"]],
-                    }],
-                },
-            }
+            self.assertEqual(OLYMPUS_SECTION["id"], section["evidence"]["id"])
+            raise __import__("llm").ResearchLoopFinished("complete")
         return agent
 
-    def _run_grounded_question(self, question):
+    def _run_grounded_question(self, question, facts=None):
         observed_products = []
-        with patch("bot.retrieve_facts", return_value=[OLYMPUS_FACT]), \
-             patch("bot.search_codebase", return_value=[OLYMPUS_SEARCH]), \
-             patch("bot.read_codebase_section", return_value=OLYMPUS_SECTION), \
+        class RepoTools:
+            def __init__(self, budget):
+                del budget
+            def execute(self, name, _arguments):
+                if name == "search_repository":
+                    return {"anchors": [{"anchor_id": "oa_wallet", "citable": False}]}
+                if name == "read_section":
+                    return {"evidence": {**OLYMPUS_SECTION, "citable": True}}
+                return {"anchors": []}
+        def writer(_system, _messages, _schema, name="", **_kwargs):
+            if name == "support_luna_research_plan":
+                return self._plan()
+            return self._draft("Olympus support answer.", OLYMPUS_SECTION["id"])
+        with patch("bot.retrieve_facts", return_value=facts if facts is not None else [OLYMPUS_FACT]), \
+             patch("bot.OlympusRepositoryTools", RepoTools), \
+             patch("bot.ask_json", side_effect=writer), \
              patch("bot.ask_json_with_tools", side_effect=self._grounded_agent(observed_products)):
             result = autonomous_decision(question, [{"role": "user", "content": question}])
         return result, observed_products
@@ -117,11 +130,9 @@ class OlympusScopeTests(unittest.TestCase):
     def test_valhalla_fact_is_excluded_from_an_olympus_evidence_packet(self):
         valhalla_fact = dict(OLYMPUS_FACT, id="valhalla.scope.fact", product="valhalla")
         observed_products = []
-        with patch("bot.retrieve_facts", return_value=[OLYMPUS_FACT, valhalla_fact]), \
-             patch("bot.search_codebase", return_value=[OLYMPUS_SEARCH]), \
-             patch("bot.read_codebase_section", return_value=OLYMPUS_SECTION), \
-             patch("bot.ask_json_with_tools", side_effect=self._grounded_agent(observed_products)):
-            result = autonomous_decision("In Olympus, what does Ratio % do?", [])
+        result, observed_products = self._run_grounded_question(
+            "In Olympus, what does Ratio % do?", [OLYMPUS_FACT, valhalla_fact],
+        )
         self.assertEqual(["olympus", "olympus", "olympus"], observed_products)
         self.assertNotIn("valhalla.scope.fact", result["evidence_ids"])
 
@@ -136,8 +147,7 @@ class OlympusScopeTests(unittest.TestCase):
         result = autonomous_decision("hi", [], force_reply=True)
         self.assertEqual("answer", result["action"])
         self.assertEqual("social", result["intent"])
-        enums = [tool["parameters"]["properties"]["product"]["enum"] for tool in LUNA_RESEARCH_TOOLS]
-        self.assertEqual([["olympus"]] * len(enums), enums)
+        self.assertFalse(any("valhalla" in str(tool).lower() for tool in LUNA_RESEARCH_TOOLS))
 
 
 if __name__ == "__main__":
