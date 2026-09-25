@@ -4,7 +4,7 @@ from datetime import datetime, timezone
 from support_pipeline import (
     calculate, calculate_apr, calculate_fees_and_net, calculate_pnl,
     calculate_position_exposure, calculate_stop_take_prices, calculate_support_values, days_until, detect_product_feature,
-    extract_question, format_calculation_response, rank_evidence,
+    extract_question, format_calculation_response, rank_evidence, resolve_live_product,
 )
 
 
@@ -42,6 +42,14 @@ class SupportPipelineTests(unittest.TestCase):
         detected = detect_product_feature("Where do I set the Jupiter Score filter for my DLMM follow?")
         self.assertEqual("valhalla", detected["product"])
         self.assertEqual("copy_trading", detected["feature"])
+
+    def test_live_scope_hands_off_explicit_valhalla_but_defaults_shared_terms_to_olympus(self):
+        valhalla = resolve_live_product("In Valhalla, what does Ratio % do?")
+        shared = resolve_live_product("What does Ratio % do when copying a wallet?")
+        self.assertFalse(valhalla["supported"])
+        self.assertEqual("valhalla", valhalla["product"])
+        self.assertTrue(shared["supported"])
+        self.assertEqual("olympus", shared["product"])
 
     def test_follow_up_uses_established_product_to_break_a_shared_label_tie(self):
         detected = detect_product_feature("What does Max Trade Size mean?", prior_product="olympus")

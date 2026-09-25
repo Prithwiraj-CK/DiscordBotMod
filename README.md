@@ -87,7 +87,10 @@ control; keep it only in the ignored `.env` file.
 
 ### 3. Add knowledge
 
-Drop `valhalla.md` and `olympus.md` into `knowledge/`. See `knowledge/README.md`.
+The repository retains both `valhalla.md` and `olympus.md` in `knowledge/`.
+Live support is currently Olympus-only: Valhalla knowledge is dormant and an
+explicit Valhalla question receives a fixed team handoff. See
+`knowledge/README.md`.
 
 ### 4. Run
 
@@ -131,6 +134,7 @@ python evaluate.py
 python evaluate.py --list
 python evaluate.py --answers answers.json
 python evaluate.py --run-openai
+python evaluate.py --olympus-only --run-openai
 python evaluate.py --run-openai --post-to-test
 python index_discord_history.py --scan
 python index_discord_history.py
@@ -155,10 +159,10 @@ secondary context and cannot override approved facts. Tagged messages with
 Discord image attachments receive a one-time vision transcription/summary;
 image text is untrusted context and cannot override approved facts.
 
-If `CODEBASE_VALHALLA_PATH` and `CODEBASE_OLYMPUS_PATH` are configured and
-`CODEBASE_SEARCH_ENABLED=true`, product and workflow questions also investigate
-those two repositories locally. This is a separate opt-in because the selected
-excerpts are sent to OpenAI as model context. Research is read-only: semantic
+If `CODEBASE_OLYMPUS_PATH` is configured and `CODEBASE_SEARCH_ENABLED=true`,
+Olympus product and workflow questions also investigate that repository
+locally. This is a separate opt-in because the selected excerpts are sent to
+OpenAI as model context. Research is read-only: semantic
 query expansion, keyword search, filename/symbol/route/command/heading search,
 one-hop local-reference following, complete bounded function/section reads,
 and one bounded evidence-review pass are used. It excludes dependencies,
@@ -167,11 +171,16 @@ and redacts sensitive-looking values. The model has no shell or filesystem-write
 tool. Code excerpts can explain exact implementation behavior; when enabled,
 approved facts remain authoritative for fees, security, account-specific
 support, privacy, and product promises. Repository search is disabled by
-default.
+default. `CODEBASE_VALHALLA_PATH` and `REPOSITORY_SEARCH_BOTH` are retained
+only for the dormant Valhalla implementation and have no effect in the active
+Olympus-only support path.
 
-`REPOSITORY_SEARCH_BOTH=true` makes every non-social support question search
-both fixed repositories before drafting, so a wrong initial product inference
-cannot hide an answer. `APPROVED_FACTS_ENABLED=true` keeps curated FAQ facts
+`SUPPORTED_PRODUCTS=olympus` is the authoritative live product scope. It keeps
+shared terms such as “ratio”, “wallet”, and “copy trading” inside Olympus
+unless the user explicitly names Valhalla; that explicit case is handed off
+before any model, fact retrieval, or repository call. Re-enable Valhalla only
+through this single configuration after its own release evaluation.
+`APPROVED_FACTS_ENABLED=true` keeps curated FAQ facts
 available as authoritative evidence for fees, product promises, onboarding,
 and security. Set it to `false` only for a repository-only shadow
 evaluation. It does **not** disable account-specific, secret, security, or

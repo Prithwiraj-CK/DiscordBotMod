@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import ast
 import math
+import os
 import re
 from datetime import datetime, timezone
 from typing import Any
@@ -44,6 +45,24 @@ PRODUCT_REGISTRY: dict[str, dict[str, Any]] = {
         },
     },
 }
+
+# This is the only switch that decides which products the live support path
+# may research or answer. Product definitions below deliberately retain
+# Valhalla so it can be re-enabled later without reconstructing its knowledge
+# or helpers, but an unsupported product cannot enter live research.
+_SUPPORTED_PRODUCTS_ENV = "SUPPORTED_PRODUCTS"
+
+
+def _configured_supported_products(raw: str | None) -> tuple[str, ...]:
+    requested = [item.strip().lower() for item in str(raw or "").split(",")]
+    supported = tuple(dict.fromkeys(
+        item for item in requested if item in PRODUCT_REGISTRY
+    ))
+    return supported or ("olympus",)
+
+
+SUPPORTED_PRODUCTS = _configured_supported_products(os.getenv(_SUPPORTED_PRODUCTS_ENV, "olympus"))
+DEFAULT_SUPPORTED_PRODUCT = SUPPORTED_PRODUCTS[0]
 
 _NORMALIZE_RE = re.compile(r"[^a-z0-9]+")
 _NUMBER_RE = r"\$?\s*(\d+(?:\.\d+)?)"
@@ -121,6 +140,46 @@ def detect_product_feature(text: str, prior_product: str | None = None) -> dict[
         "exact_labels": selected["exact_labels"] if selected else [],
         "matched_terms": selected["matched_terms"] if selected else [],
         "candidates": candidates[:6],
+    }
+
+
+def is_supported_product(product: str | None) -> bool:
+    """Whether a product is enabled for the live support path."""
+    return str(product or "").lower() in SUPPORTED_PRODUCTS
+
+
+def _explicit_products(text: str) -> tuple[str, ...]:
+    return tuple(
+        product
+        for product, definition in PRODUCT_REGISTRY.items()
+        if any(_contains(text, alias) for alias in definition["aliases"])
+    )
+
+
+def resolve_live_product(text: str, prior_product: str | None = None) -> dict[str, Any]:
+    """Resolve live scope without allowing a shared term to activate Valhalla.
+
+    Explicit unsupported product names are kept visible so the caller can
+    return its fixed handoff before any model or repository work. Otherwise,
+    shared labels such as Ratio % and Max Trade Size stay inside the default
+    supported domain.
+    """
+    explicit = _explicit_products(text)
+    unsupported = next((product for product in explicit if not is_supported_product(product)), None)
+    if unsupported:
+        return {"product": unsupported, "supported": False, "explicit": True}
+
+    detection = detect_product_feature(
+        text,
+        prior_product=prior_product if is_supported_product(prior_product) else None,
+    )
+    detected = str(detection.get("product") or "")
+    product = detected if is_supported_product(detected) else DEFAULT_SUPPORTED_PRODUCT
+    return {
+        "product": product,
+        "supported": True,
+        "explicit": product in explicit,
+        "detection": detection,
     }
 
 

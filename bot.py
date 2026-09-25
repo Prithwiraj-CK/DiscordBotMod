@@ -47,6 +47,8 @@ from discum.gateway.gateway import (
     ConnectionResumableException,
 )
 
+load_dotenv()
+
 from alerts import alert
 from codebase_search import (
     _workflow_queries, codebase_prompt, read_codebase_context, read_codebase_file,
@@ -59,12 +61,12 @@ from knowledge import (
 )
 from llm import LLMUnavailable, ask_json, ask_json_with_tools
 from support_pipeline import (
-    analysis_log, calculate_support_values, detect_product_feature,
-    extract_question, format_calculation_response, rank_evidence,
+    DEFAULT_SUPPORTED_PRODUCT, SUPPORTED_PRODUCTS, analysis_log,
+    calculate_support_values, detect_product_feature, extract_question,
+    format_calculation_response, is_supported_product, rank_evidence,
+    resolve_live_product,
 )
 from usage_reporting import request_usage_report_update, start_daily_usage_reporter
-
-load_dotenv()
 
 logging.basicConfig(
     level=logging.INFO,
@@ -253,6 +255,12 @@ ALLOWED_CHANNELS = set()
 # The model emits this exact token when it can't answer. We never show it to
 # the user - we swap it for a human handoff.
 ESCALATE = "[[ESCALATE]]"
+
+# This is deliberately not the generic escalation marker. It is a fixed
+# product-scope response generated before Luna or any research tool is called.
+UNSUPPORTED_PRODUCT_HANDOFF = (
+    "Salena is currently limited to Olympus support; a team member will need to help with Valhalla."
+)
 
 # Emitted when a message needs no reply at all. Without this she answers every
 # greeting in the channel and pings staff over "lol".
@@ -713,9 +721,9 @@ not turn an internal implementation detail into a public product promise.
 APPROVED EVIDENCE AND READ-ONLY CODEBASE EXCERPTS
 """
 
-LUNA_SUPPORT_SYSTEM = """You are Salena, an autonomous Olympus and Valhalla
-support researcher. Produce the final Discord response after researching the
-current repositories. The latest user message is the task. Earlier messages
+LUNA_SUPPORT_SYSTEM = """You are Salena, an autonomous Olympus support
+researcher. Produce the final Discord response after researching the current
+Olympus repository. The latest user message is the task. Earlier messages
 are conversation context only: use them to resolve pronouns, short follow-ups,
 the product, and steps already tried, but never answer an older question in
 place of the latest one.
@@ -3350,14 +3358,14 @@ LUNA_RESEARCH_TOOLS = [
         "type": "function",
         "name": "search_repository",
         "description": (
-            "Search the current Olympus or Valhalla repository by user wording, "
+            "Search the current Olympus repository by user wording, "
             "feature terms, filenames, symbols, routes, commands, and documentation headings. "
             "Use this before answering implementation or workflow questions."
         ),
         "parameters": {
             "type": "object", "additionalProperties": False,
             "properties": {
-                "product": {"type": "string", "enum": ["olympus", "valhalla"]},
+                "product": {"type": "string", "enum": list(SUPPORTED_PRODUCTS)},
                 "query": {"type": "string", "minLength": 1, "maxLength": 320},
                 "limit": {"type": "integer", "minimum": 1, "maximum": 20},
             },
@@ -3374,7 +3382,7 @@ LUNA_RESEARCH_TOOLS = [
         "parameters": {
             "type": "object", "additionalProperties": False,
             "properties": {
-                "product": {"type": "string", "enum": ["olympus", "valhalla"]},
+                "product": {"type": "string", "enum": list(SUPPORTED_PRODUCTS)},
                 "path": {"type": "string", "minLength": 1, "maxLength": 500},
                 "line": {"type": "integer", "minimum": 1, "maximum": 100000},
             },
@@ -3390,7 +3398,7 @@ LUNA_RESEARCH_TOOLS = [
         "parameters": {
             "type": "object", "additionalProperties": False,
             "properties": {
-                "product": {"type": "string", "enum": ["olympus", "valhalla"]},
+                "product": {"type": "string", "enum": list(SUPPORTED_PRODUCTS)},
                 "path": {"type": "string", "minLength": 1, "maxLength": 500},
                 "start_line": {"type": "integer", "minimum": 1, "maximum": 100000},
                 "end_line": {"type": "integer", "minimum": 1, "maximum": 100000},
@@ -3408,7 +3416,7 @@ LUNA_RESEARCH_TOOLS = [
         "parameters": {
             "type": "object", "additionalProperties": False,
             "properties": {
-                "product": {"type": "string", "enum": ["olympus", "valhalla"]},
+                "product": {"type": "string", "enum": list(SUPPORTED_PRODUCTS)},
                 "query": {"type": "string", "minLength": 1, "maxLength": 320},
                 "intent": {"type": "string", "maxLength": 80},
             },
@@ -3425,7 +3433,7 @@ LUNA_RESEARCH_TOOLS = [
         "parameters": {
             "type": "object", "additionalProperties": False,
             "properties": {
-                "product": {"type": "string", "enum": ["olympus", "valhalla"]},
+                "product": {"type": "string", "enum": list(SUPPORTED_PRODUCTS)},
                 "query": {"type": "string", "minLength": 1, "maxLength": 320},
             },
             "required": ["product", "query"],
@@ -3437,12 +3445,13 @@ LUNA_TOOL_RESEARCH_SYSTEM = LUNA_SUPPORT_SYSTEM + """
 
 RESEARCH WORKFLOW
 You are the final support researcher and writer. Your research is internal.
-For every factual Olympus or Valhalla question, use this exact state machine:
+For every factual Olympus question, use this exact state machine:
 (1) discover: search approved facts and the relevant repository; (2) read: open
 the one or two strongest complete sections; (3) assess whether those sections
-cover every part of the question; (4) answer. Search both products if the
-question is ambiguous. Do not make the user choose when surrounding context or
-research resolves it. If the material genuinely lacks a required part, use the
+cover every part of the question; (4) answer. Interpret shared product terms
+inside Olympus unless the user explicitly names another product. Do not make
+the user choose when surrounding context or research resolves it. If the
+material genuinely lacks a required part, use the
 remaining permitted discovery/read call specifically for that gap.
 
 Do not mention code, files, repository searches, sources, evidence, citations,
@@ -3502,31 +3511,43 @@ def _deterministic_research_failures(query, draft, valid_ids, factual_question):
 def _luna_tool_research_decision(query, turns, product_hint=None, force_reply=False):
     """Run one bounded discover → read → assess → answer investigation."""
     if force_reply and _is_social_smalltalk(query):
-        return _decision("answer", product_hint or "generic", "social", _social_reply(query), confidence=1.0)
+        social_product = product_hint if is_supported_product(product_hint) else "generic"
+        return _decision("answer", social_product, "social", _social_reply(query), confidence=1.0)
     if _requires_account_handoff(query):
-        return _decision("escalate", product_hint or "unknown", "support_triage", ESCALATE, confidence=1.0)
+        return _decision("escalate", DEFAULT_SUPPORTED_PRODUCT, "support_triage", ESCALATE, confidence=1.0)
 
     context_turns = _luna_conversation_window(turns)
     resolved_query = _resolve_follow_up_question(query, context_turns)
-    detection = detect_product_feature(resolved_query, prior_product=product_hint)
-    product = product_hint if product_hint in {"olympus", "valhalla"} else (
-        detection.get("product") if detection.get("product") in {"olympus", "valhalla"}
-        else _context_product_hint(resolved_query, context_turns)
-    )
+    live_scope = resolve_live_product(resolved_query, prior_product=product_hint)
+    if not live_scope["supported"]:
+        return _decision(
+            "escalate", live_scope["product"], "unsupported_product",
+            UNSUPPORTED_PRODUCT_HANDOFF, confidence=1.0,
+        )
+    detection = live_scope.get("detection") or detect_product_feature(resolved_query)
+    product = live_scope["product"]
     intent = _intent_hint(resolved_query) or "unknown"
     collected = OrderedDict()
     research_state = {"discoveries": 0, "reads": 0}
 
     def remember(items):
+        kept = []
         for item in items:
+            item_product = str(item.get("product") or product).lower()
+            if item_product != product or not is_supported_product(item_product):
+                log.warning("Ignoring out-of-scope research evidence for %s", item_product)
+                continue
             evidence_id = str(item.get("id") or "")
             if evidence_id:
                 collected[evidence_id] = item
+                kept.append(item)
+        return kept
 
     def execute_tool(name, arguments):
-        selected_product = str(arguments.get("product") or "")
-        if selected_product not in {"olympus", "valhalla"}:
-            return {"error": "Choose olympus or valhalla."}
+        requested_product = str(arguments.get("product") or "").lower()
+        if requested_product != product or not is_supported_product(requested_product):
+            return {"error": "This live support session is limited to {}.".format(product)}
+        selected_product = product
         tool_query = str(arguments.get("query") or resolved_query).strip()[:320]
         discovery_order = ("search_approved_facts", "search_repository")
         if research_state["discoveries"] < len(discovery_order):
@@ -3541,15 +3562,13 @@ def _luna_tool_research_decision(query, turns, product_hint=None, force_reply=Fa
         if name == "search_repository":
             research_state["discoveries"] += 1
             hits = search_codebase(tool_query, selected_product, limit=min(20, max(1, int(arguments.get("limit", 12)))))
-            remember(hits)
-            return {"results": [_tool_evidence_payload(item) for item in hits]}
+            return {"results": [_tool_evidence_payload(item) for item in remember(hits)]}
         if name == "read_repository_section":
             if research_state["reads"] >= 2:
                 return {"error": "Read phase is complete. Assess the collected evidence and return the final answer."}
             research_state["reads"] += 1
             item = read_codebase_section(selected_product, str(arguments.get("path") or ""), int(arguments.get("line", 1)))
-            if item:
-                remember([item])
+            if item and remember([item]):
                 return {"result": _tool_evidence_payload(item)}
             return {"error": "That repository section was not available."}
         if name == "read_repository_file":
@@ -3561,8 +3580,7 @@ def _luna_tool_research_decision(query, turns, product_hint=None, force_reply=Fa
             if end < start or end - start > 249:
                 return {"error": "Choose a valid bounded range of at most 250 lines."}
             item = read_codebase_file(selected_product, str(arguments.get("path") or ""), start, end)
-            if item:
-                remember([item])
+            if item and remember([item]):
                 return {"result": _tool_evidence_payload(item)}
             return {"error": "That repository range was not available."}
         if name == "search_approved_facts":
@@ -3570,8 +3588,7 @@ def _luna_tool_research_decision(query, turns, product_hint=None, force_reply=Fa
             if not APPROVED_FACTS_ENABLED:
                 return {"results": [], "notice": "Approved facts are currently disabled."}
             facts = retrieve_facts(tool_query, product=selected_product, intent=str(arguments.get("intent") or intent), limit=12)
-            remember(facts)
-            return {"results": [_tool_evidence_payload(item) for item in facts]}
+            return {"results": [_tool_evidence_payload(item) for item in remember(facts)]}
         if name == "search_staff_examples":
             return {"error": "Staff-history search is not part of this answer workflow. Use the current conversation for context."}
         return {"error": "Unknown research tool."}
@@ -3660,7 +3677,7 @@ def _luna_tool_research_decision(query, turns, product_hint=None, force_reply=Fa
 
 
 def autonomous_decision(query, turns, product_hint=None, force_reply=False):
-    """Research both current repositories, then let Luna make one final decision.
+    """Research the enabled product scope, then let Luna make one final decision.
 
     The former live pipeline had several independent decision makers. A route
     classifier, deterministic FAQ overrides, and a raw historical-staff
@@ -4658,7 +4675,7 @@ def main():
     log.info("Short-term conversation memory: %s", _conversation_memory.status())
     log.info(
         "Answer research: repositories=%s, approved facts as answer source=%s",
-        "Valhalla + Olympus" if REPOSITORY_SEARCH_BOTH else "router-selected product",
+        ", ".join(SUPPORTED_PRODUCTS),
         "enabled" if APPROVED_FACTS_ENABLED else "disabled",
     )
     for cid in sorted(ALLOWED_CHANNELS, key=lambda c: _channel_names.get(c, c)):

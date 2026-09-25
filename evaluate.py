@@ -151,6 +151,16 @@ def score_answers(cases: list[dict[str, Any]], answers: Any) -> dict[str, Any]:
     return {"passed": passed, "failed": len(results) - passed, "total": len(results), "results": results}
 
 
+def olympus_release_cases(cases: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Return the Olympus release gate without hiding product-routing work.
+
+    Generic safety cases remain part of the gate. Valhalla cases stay in the
+    corpus for its dormant implementation, but do not belong to an
+    Olympus-only release evaluation.
+    """
+    return [case for case in cases if case.get("product") in {"olympus", "generic"}]
+
+
 def run_openai_cases(cases: list[dict[str, Any]], post_to_test: bool = False) -> dict[str, Any]:
     """Run every case through the production decision function.
 
@@ -176,7 +186,6 @@ def run_openai_cases(cases: list[dict[str, Any]], post_to_test: bool = False) ->
             decision = bot.autonomous_decision(
                 question,
                 [{"role": "user", "content": question}],
-                product_hint=case["product"] if case["product"] in {"valhalla", "olympus"} else None,
             )
             answer = {
                 "id": case["id"],
@@ -256,6 +265,10 @@ def main() -> int:
     parser.add_argument("--list", action="store_true", help="list the anonymized regression cases")
     parser.add_argument("--answers", type=Path, help="score a JSON file of structured answers")
     parser.add_argument("--run-openai", action="store_true", help="run all cases through the OpenAI pipeline")
+    parser.add_argument(
+        "--olympus-only", action="store_true",
+        help="run or score only Olympus and generic safety cases",
+    )
     parser.add_argument("--post-to-test", action="store_true", help="post each replay result to #bot-test")
     parser.add_argument(
         "--min-score", type=float,
@@ -268,6 +281,8 @@ def main() -> int:
         facts_payload, cases_payload = validate_corpus()
         facts = facts_payload["facts"]
         cases = cases_payload["cases"]
+        if args.olympus_only:
+            cases = olympus_release_cases(cases)
         if args.post_to_test and not args.run_openai:
             raise ValueError("--post-to-test requires --run-openai")
         if args.min_score is not None and not 0 <= args.min_score <= 1:

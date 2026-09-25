@@ -289,9 +289,9 @@ class RepositoryReasoningTests(unittest.TestCase):
             "wallet opens its position?"
         )
         source = {
-            "id": "codebase.valhalla.copy-order",
+            "id": "codebase.olympus.copy-order",
             "source_type": "codebase_section",
-            "product": "valhalla",
+            "product": "olympus",
             "source": "copy-trade-transaction-watcher.ts:260-620",
             "path": "src/scripts/copy-trade/copy-trade-transaction-watcher.ts",
             "line": 260,
@@ -300,7 +300,7 @@ class RepositoryReasoningTests(unittest.TestCase):
                 "then processUserForCopyTrade enqueues each follower's copy job."
             ),
         }
-        mocked_search.side_effect = lambda query, product, limit=28: [source] if product == "valhalla" else []
+        mocked_search.side_effect = lambda query, product, limit=28: [source] if product == "olympus" else []
         mocked_read.return_value = source
         mocked_history.return_value = [{
             "id": "bad-old-answer",
@@ -330,7 +330,7 @@ class RepositoryReasoningTests(unittest.TestCase):
                 }
             self.assertEqual("support_luna_final", name)
             answer = (
-                "The lead wallet transaction is processed first. Valhalla then "
+                "The lead wallet transaction is processed first. Olympus then "
                 "queues the copying wallet's position from that observed event."
             )
             return {
@@ -346,18 +346,18 @@ class RepositoryReasoningTests(unittest.TestCase):
         def agent_result(system_prompt, messages, schema, tools, executor, **kwargs):
             del system_prompt, messages, schema, tools, kwargs
             facts_result = executor("search_approved_facts", {
-                "product": "valhalla", "query": question, "intent": "unknown",
+                "product": "olympus", "query": question, "intent": "unknown",
             })
             self.assertEqual([], facts_result["results"])
             tool_result = executor("search_repository", {
-                "product": "valhalla", "query": question, "limit": 8,
+                "product": "olympus", "query": question, "limit": 8,
             })
             self.assertTrue(tool_result["results"])
             executor("read_repository_section", {
-                "product": "valhalla", "path": source["path"], "line": source["line"],
+                "product": "olympus", "path": source["path"], "line": source["line"],
             })
             answer = (
-                "The lead wallet transaction is processed first. Valhalla then "
+                "The lead wallet transaction is processed first. Olympus then "
                 "queues the copying wallet's position from that observed event."
             )
             return {
