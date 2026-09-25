@@ -4,6 +4,7 @@ import unittest
 from unittest.mock import patch
 
 from bot import (
+    _deterministic_research_failures,
     _historical_product_hint, _known_safe_answer, _luna_conversation_window,
     _repository_products, _requires_account_handoff, _staff_evidence_answer,
     _staff_history_evidence, _valhalla_capacity_answer, autonomous_decision,
@@ -22,6 +23,30 @@ QUESTION = (
 
 
 class RepositoryReasoningTests(unittest.TestCase):
+    def test_general_product_question_cannot_escalate_after_research(self):
+        draft = {
+            "action": "escalate", "evidence_ids": ["repo.wallet.section"],
+            "claim_evidence": [], "draft_answer": "",
+        }
+        failures, _ = _deterministic_research_failures(
+            "Why does a new Olympus wallet have signing and trading addresses?",
+            draft, {"repo.wallet.section"}, factual_question=True,
+        )
+        self.assertIn("A general product question must be answered, not handed off.", failures)
+
+    def test_deterministic_gate_accepts_grounded_general_answer(self):
+        draft = {
+            "action": "answer", "evidence_ids": ["repo.wallet.section"],
+            "claim_evidence": [{"claim": "The signing address authorizes actions.", "evidence_ids": ["repo.wallet.section"]}],
+            "draft_answer": "The signing address authorizes actions.",
+        }
+        failures, used = _deterministic_research_failures(
+            "Why does a new Olympus wallet have signing and trading addresses?",
+            draft, {"repo.wallet.section"}, factual_question=True,
+        )
+        self.assertEqual([], failures)
+        self.assertEqual({"repo.wallet.section"}, used)
+
     def test_luna_window_keeps_five_prior_user_messages(self):
         turns = []
         for index in range(7):

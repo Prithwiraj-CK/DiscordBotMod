@@ -257,6 +257,10 @@ def main() -> int:
     parser.add_argument("--answers", type=Path, help="score a JSON file of structured answers")
     parser.add_argument("--run-openai", action="store_true", help="run all cases through the OpenAI pipeline")
     parser.add_argument("--post-to-test", action="store_true", help="post each replay result to #bot-test")
+    parser.add_argument(
+        "--min-score", type=float,
+        help="minimum passing fraction for an OpenAI release gate, for example 1.0",
+    )
     parser.add_argument("--json", action="store_true", help="emit machine-readable output")
     args = parser.parse_args()
 
@@ -266,6 +270,8 @@ def main() -> int:
         cases = cases_payload["cases"]
         if args.post_to_test and not args.run_openai:
             raise ValueError("--post-to-test requires --run-openai")
+        if args.min_score is not None and not 0 <= args.min_score <= 1:
+            raise ValueError("--min-score must be between 0 and 1")
         if args.list:
             output: Any = [
                 {
@@ -307,6 +313,14 @@ def main() -> int:
                 print(f"  {result['id']}: {'; '.join(result['errors'])}")
     else:
         print(f"Corpus OK: {output['facts']} facts, {output['cases']} cases")
+    if args.min_score is not None and (args.answers or args.run_openai):
+        score = output["passed"] / output["total"] if output["total"] else 0
+        if score < args.min_score:
+            print(
+                "Release gate failed: {:.1%} is below required {:.1%}".format(score, args.min_score),
+                file=sys.stderr,
+            )
+            return 1
     return 0 if not args.answers or output.get("failed", 0) == 0 else 1
 
 

@@ -3474,6 +3474,31 @@ def _tool_evidence_payload(item):
     }
 
 
+def _deterministic_research_failures(query, draft, valid_ids, factual_question):
+    """Check mechanical safety invariants without a second model veto.
+
+    A second LLM validator was useful for audits but unreliable as a live
+    decision maker: it could reject a correct, researched explanation because
+    it preferred a different wording.  This gate deliberately checks only
+    things the application can establish exactly.
+    """
+    action = str(draft.get("action") or "")
+    answer = str(draft.get("draft_answer") or "").strip()
+    used_ids = _normalise_draft_evidence(draft)
+    failures = []
+    if action not in {"answer", "clarify", "escalate", "ignore"}:
+        failures.append("The response action was invalid.")
+    if action in {"answer", "clarify"} and not answer:
+        failures.append("The response was empty.")
+    if not used_ids.issubset(valid_ids):
+        failures.append("The answer cited evidence outside this research session.")
+    if factual_question and action == "answer" and not used_ids:
+        failures.append("A factual answer needs evidence from this research session.")
+    if factual_question and action == "escalate" and not _requires_account_handoff(query):
+        failures.append("A general product question must be answered, not handed off.")
+    return failures, used_ids
+
+
 def _luna_tool_research_decision(query, turns, product_hint=None, force_reply=False):
     """Use a multi-turn Luna/tool loop; validation failures start new research."""
     if force_reply and _is_social_smalltalk(query):
@@ -3545,7 +3570,30 @@ def _luna_tool_research_decision(query, turns, product_hint=None, force_reply=Fa
         "Use the conversation only to understand context; the latest question is the task."
     ).format(query, resolved_query, product or "unknown", intent)
     agent_turns = list(context_turns) + [{"role": "user", "content": base_prompt}]
-    max_rounds = _env_int("LUNA_RESEARCH_MAX_TOOL_ROUNDS", 6)
+    # Four calls cover the normal pattern: facts, search, section, and one
+    # related function/file. More calls tend to be repetitive rather than
+    # useful, and the loop always gets a final no-tools synthesis turn.
+    max_rounds = _env_int("LUNA_RESEARCH_MAX_TOOL_ROUNDS", 4)
+
+    def final_from_collected_evidence(instruction):
+        """Produce an answer from completed research if a tool turn misbehaves."""
+        evidence = list(collected.values())
+        if not evidence:
+            return None
+        try:
+            return ask_json(
+                LUNA_SUPPORT_SYSTEM + _evidence_text(evidence) + "\n\nFINAL ANSWER REQUIRED\n"
+                + instruction
+                + " Return action=answer unless this is a true account or security incident. "
+                "Do not mention research, code, files, or evidence to the user. Cite only supplied IDs.",
+                agent_turns,
+                DRAFT_SCHEMA,
+                name="support_luna_research_finalization",
+                temperature=0.0,
+            )
+        except Exception as exc:
+            log.warning("Luna researched finalization unavailable: %s", exc)
+            return None
 
     for research_attempt in range(2):
         try:
@@ -3561,7 +3609,11 @@ def _luna_tool_research_decision(query, turns, product_hint=None, force_reply=Fa
             )
         except LLMUnavailable as exc:
             log.warning("Luna tool research unavailable: %s", exc)
-            return _decision("escalate", product or "unknown", intent, ESCALATE, confidence=0.0)
+            draft = final_from_collected_evidence(
+                "The research loop ended unexpectedly after collecting evidence. Answer the user's latest question directly from it."
+            )
+            if draft is None:
+                return _decision("escalate", product or "unknown", intent, ESCALATE, confidence=0.0)
 
         action = str(draft.get("action") or "")
         if force_reply and action == "ignore":
@@ -3569,28 +3621,10 @@ def _luna_tool_research_decision(query, turns, product_hint=None, force_reply=Fa
             action = "clarify"
         evidence = list(collected.values())
         valid_ids = {str(item.get("id") or "") for item in evidence}
-        used_ids = _normalise_draft_evidence(draft)
+        failures, used_ids = _deterministic_research_failures(
+            query, draft, valid_ids, factual_question,
+        )
         answer = str(draft.get("draft_answer") or "").strip()
-        needs_evidence = factual_question and action == "answer"
-        failures = []
-        if action not in {"answer", "clarify", "escalate", "ignore"} or not answer and action in {"answer", "clarify"}:
-            failures.append("The response action or answer was invalid.")
-        if not used_ids.issubset(valid_ids):
-            failures.append("The answer cited evidence outside this research session.")
-        if needs_evidence and not used_ids:
-            failures.append("A factual answer needs evidence from the current research session.")
-        if action in {"answer", "clarify"} and not failures:
-            try:
-                _, validation_failures = _validate_luna_draft(
-                    query, product or "unknown", detection.get("feature"), evidence, draft, context_turns,
-                    allow_correction=False,
-                )
-                # The validator's legacy correction is deliberately not used here:
-                # feedback must send Luna back through tools, not just another rewrite.
-                failures.extend(validation_failures)
-            except Exception as exc:
-                log.warning("Luna tool-loop validation unavailable: %s", exc)
-                failures.append("The answer could not be validated.")
         if not failures:
             if action == "ignore":
                 return _decision("ignore", product or "generic", intent, IGNORE, confidence=0.8)
@@ -3599,7 +3633,21 @@ def _luna_tool_research_decision(query, turns, product_hint=None, force_reply=Fa
             return _decision(action, product or "unknown", intent, answer, evidence_ids=used_ids,
                              missing_information=draft.get("missing_information", []))
 
-        log.info("Luna tool-loop validation requires more research: %s", failures)
+        log.info("Luna tool-loop mechanical gate requires correction: %s", failures)
+        # If research already exists, first ask Luna to complete its answer
+        # from that evidence. This prevents a generic escalation from causing
+        # redundant searches and preserves the one-agent research workflow.
+        finalized = final_from_collected_evidence("Fix this issue: {}.".format("; ".join(failures)))
+        if finalized is not None:
+            draft = finalized
+            action = str(draft.get("action") or "")
+            failures, used_ids = _deterministic_research_failures(
+                query, draft, valid_ids, factual_question,
+            )
+            answer = str(draft.get("draft_answer") or "").strip()
+            if not failures:
+                return _decision(action, product or "unknown", intent, answer, evidence_ids=used_ids,
+                                 missing_information=draft.get("missing_information", []))
         if research_attempt == 0:
             agent_turns.append({"role": "user", "content": (
                 "VALIDATION FEEDBACK: {}\nResearch again with the tools, especially complete "
