@@ -9,7 +9,7 @@ from types import SimpleNamespace
 from unittest.mock import Mock, patch
 
 import llm
-from bot import ESCALATE, autonomous_decision
+from bot import ESCALATE, _final_evidence_packet, autonomous_decision
 from codebase_search import read_codebase_file
 
 
@@ -105,6 +105,17 @@ class ResearchBudgetTests(unittest.TestCase):
             result = autonomous_decision("In Olympus, what does Ratio % do?", [])
         self.assertEqual("escalate", result["action"])
         self.assertEqual("no_progress", budget.stop_reason)
+
+    def test_non_citable_search_anchor_cannot_enter_final_evidence_packet(self):
+        anchor = {
+            "id": "codebase.olympus.anchor", "source_type": "codebase_section",
+            "citable": False, "fact": "A search anchor only.",
+        }
+        section = {
+            "id": "codebase.olympus.section", "source_type": "codebase_section",
+            "citable": True, "fact": "A complete read section.",
+        }
+        self.assertEqual([section], _final_evidence_packet([anchor, section], max_items=8))
 
     def test_final_writer_receives_only_selected_compact_evidence(self):
         fact = {

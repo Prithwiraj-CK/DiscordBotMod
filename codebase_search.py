@@ -3,7 +3,7 @@
 The model never chooses a path and never runs a command. This module accepts a
 plain-text query, searches only the fixed roots configured in .env, excludes
 generated and secret-shaped files, redacts sensitive-looking lines, and
-returns short excerpts for the drafting step.
+returns compact, non-citable anchors for a later read step.
 """
 
 from __future__ import annotations
@@ -18,14 +18,15 @@ import time
 from pathlib import Path
 
 from llm import estimate_tokens
+from support_pipeline import PRODUCT_REGISTRY
 
 log = logging.getLogger("support-bot.codebase")
 
 _STOPWORDS = {
-    "about", "after", "also", "and", "are", "can", "does", "for", "from",
-    "how", "into", "is", "it", "its", "not", "or", "that", "the", "then",
+    "about", "after", "also", "and", "are", "can", "does", "explain", "for", "from",
+    "help", "how", "into", "is", "it", "its", "mean", "not", "or", "tell", "that", "the", "then",
     "this", "to", "what", "when", "where", "which", "with", "you", "your",
-    "component", "configured", "current", "field", "implementation", "internal",
+    "component", "configured", "current", "field", "implementation", "internal", "work",
     "setting", "settings", "validates", "validation",
 }
 _TOKEN_RE = re.compile(r"[a-zA-Z][a-zA-Z0-9_/-]{2,}")
@@ -34,6 +35,12 @@ _GENERIC_RESEARCH_TERMS = {
     "olympus", "product", "repo", "repository", "system", "thing",
     "valhalla", "wallet", "wallets", "website",
 }
+_CODE_EXTENSIONS = {".cjs", ".js", ".jsx", ".mjs", ".py", ".ts", ".tsx"}
+_DOCUMENTATION_EXTENSIONS = {".md", ".mdx", ".txt"}
+_LOW_VALUE_PATH_MARKERS = (
+    "generated", "plan", "plans", "task", "tasks", "review", "reviews", "audit",
+    "debug", "debugging", "note", "notes", "incident", "postmortem", "migration", "changelog",
+)
 _HEADING_RE = re.compile(r"^\s{0,3}(#{1,6})\s+(.+?)\s*$")
 _SYMBOL_RE = re.compile(
     r"^\s*(?:(?:export|default|public|private|protected|static|async)\s+)*"
@@ -167,6 +174,42 @@ def _queries(query: str) -> list[str]:
     if len(unique) >= 2:
         searches.extend(" ".join(unique[index:index + 2]) for index in range(len(unique) - 1))
     return list(dict.fromkeys(searches))[:8]
+
+
+def _normalised_phrase(value: str) -> str:
+    """Normalize UI labels and paths without treating punctuation as meaning."""
+    return re.sub(r"[^a-z0-9]+", " ", str(value or "").casefold()).strip()
+
+
+def _contains_phrase(haystack: str, phrase: str) -> bool:
+    normalized_phrase = _normalised_phrase(phrase)
+    return bool(normalized_phrase and normalized_phrase in _normalised_phrase(haystack))
+
+
+def _exact_concepts(query: str, product: str) -> tuple[list[str], list[str]]:
+    """Extract quoted user phrases and configured product UI labels.
+
+    UI labels are treated as indivisible concepts.  For example, searching
+    ``Max Trade Size`` first is materially different from searching ``trade``
+    and ``size`` across every implementation note in the repository.
+    """
+    clean = re.sub(r"\[ATTACHED IMAGE CONTEXT.*?\]", " ", query or "", flags=re.S)
+    quoted = [match.strip() for match in re.findall(r"[\"“]([^\"”]{2,120})[\"”]", clean)]
+    definition = PRODUCT_REGISTRY.get(str(product or "").lower(), {})
+    labels = [
+        label
+        for feature in definition.get("features", {}).values()
+        for label in feature.get("labels", ())
+        if _contains_phrase(clean, label)
+    ]
+    exact = []
+    seen = set()
+    for phrase in quoted + labels:
+        key = _normalised_phrase(phrase)
+        if key and key not in seen:
+            seen.add(key)
+            exact.append(phrase)
+    return exact, labels
 
 
 def _single_token_queries(query: str) -> list[str]:
@@ -397,6 +440,120 @@ def _semantic_terms(query: str) -> set[str]:
     return terms
 
 
+def _retrieval_terms(query: str) -> list[str]:
+    """Return user concepts only, excluding conversational filler."""
+    clean = re.sub(r"\[ATTACHED IMAGE CONTEXT.*?\]", " ", query or "", flags=re.S)
+    terms = [
+        token.casefold() for token in _TOKEN_RE.findall(clean)
+        if token.casefold() not in _STOPWORDS
+        and token.casefold() not in _GENERIC_RESEARCH_TERMS
+        and len(token) > 3
+    ]
+    return list(dict.fromkeys(terms))[:12]
+
+
+def _anchor_score_fields(item: dict, query: str, product: str,
+                         exact_phrases: list[str], ui_labels: list[str]) -> dict[str, int]:
+    """Return explicit, inspectable ranking signals for one search anchor."""
+    path = str(item.get("path") or "")
+    text = str(item.get("fact") or "")
+    kind = str(item.get("kind") or item.get("source_type") or "")
+    normalized_path = _normalised_phrase(path)
+    haystack = "{} {}".format(path, text)
+    suffix = Path(path).suffix.casefold()
+    exact_phrase = 0
+    filename = 0
+    for phrase in exact_phrases:
+        if _contains_phrase(haystack, phrase):
+            exact_phrase = max(exact_phrase, 150)
+        if _normalised_phrase(phrase) in normalized_path:
+            filename = max(filename, 90)
+    ui_label = 0
+    for label in ui_labels:
+        if _contains_phrase(haystack, label):
+            ui_label = max(ui_label, 130)
+        if _normalised_phrase(label) in normalized_path:
+            filename = max(filename, 110)
+    heading = 55 if kind == "heading" or _HEADING_RE.match(text) else 0
+    symbol = 50 if kind == "symbol" or _SYMBOL_RE.match(text) else 0
+    route = 45 if kind == "route" or _ROUTE_RE.search(text) else 0
+    documentation = 35 if suffix in _DOCUMENTATION_EXTENSIONS or "/docs/" in "/{}".format(path.casefold()) else 0
+    executable_code = 30 if suffix in _CODE_EXTENSIONS and not re.search(r"(?:^|[._/-])(test|spec)(?:[._/-]|$)", path.casefold()) else 0
+    test = -35 if re.search(r"(?:^|[._/-])(test|tests|spec|specs)(?:[._/-]|$)", path.casefold()) else 0
+    lowered_path = path.casefold()
+    generated_or_plan_penalty = -90 if any(marker in lowered_path for marker in _LOW_VALUE_PATH_MARKERS) else 0
+    if "/scripts/" in "/{}".format(lowered_path) and not any(
+        token in _normalised_phrase(query) for token in ("command", "script", "slash")
+    ):
+        generated_or_plan_penalty -= 25
+    token_overlap = sum(1 for term in _retrieval_terms(query) if term in _normalised_phrase(haystack)) * 8
+    return {
+        "exact_phrase": exact_phrase,
+        "ui_label": ui_label,
+        "filename": filename,
+        "heading": heading,
+        "symbol": symbol,
+        "route": route,
+        "documentation": documentation,
+        "executable_code": executable_code,
+        "test": test,
+        "generated_or_plan_penalty": generated_or_plan_penalty,
+        "token_overlap": token_overlap,
+    }
+
+
+def _anchor_section_key(root: Path, item: dict) -> tuple[str, int, int]:
+    """Deduplicate anchors pointing into the same readable surrounding section."""
+    relative = str(item.get("path") or "")
+    try:
+        path = (root / relative).resolve(strict=True)
+        path.relative_to(root)
+        lines = _read_text(path).splitlines()
+        start, end = _section_bounds(lines, int(item.get("line") or 1), path.suffix)
+    except (OSError, RuntimeError, ValueError, TypeError):
+        line = max(1, int(item.get("line") or 1))
+        start, end = max(1, line - 12), line + 12
+    return relative, start, end
+
+
+def _rank_and_diversify_anchors(query: str, product: str, root: Path,
+                                candidates: list[dict], limit: int) -> list[dict]:
+    """Rank exact concepts first, then return a small diverse non-citable set."""
+    exact_phrases, ui_labels = _exact_concepts(query, product)
+    ranked = []
+    for item in candidates:
+        if not item.get("path"):
+            continue
+        enriched = dict(item)
+        fields = _anchor_score_fields(enriched, query, product, exact_phrases, ui_labels)
+        enriched["score_fields"] = fields
+        enriched["score"] = sum(fields.values())
+        enriched["citable"] = False
+        ranked.append(enriched)
+    ranked.sort(key=lambda item: (
+        -item["score"],
+        -item["score_fields"]["exact_phrase"],
+        -item["score_fields"]["ui_label"],
+        item["path"].casefold(),
+        int(item.get("line") or 1),
+    ))
+    target = min(8, max(1, int(limit)))
+    selected = []
+    sections = set()
+    paths: dict[str, int] = {}
+    for item in ranked:
+        path = str(item["path"])
+        section = _anchor_section_key(root, item)
+        if section in sections or paths.get(path, 0) >= 2:
+            continue
+        sections.add(section)
+        paths[path] = paths.get(path, 0) + 1
+        selected.append(item)
+        if len(selected) >= target:
+            break
+    return selected
+
+
 def _structural_search(query: str, product: str, root: Path, limit: int) -> list[dict]:
     terms = _semantic_terms(query)
     if not terms:
@@ -436,11 +593,39 @@ def _structural_search(query: str, product: str, root: Path, limit: int) -> list
                 "Structural repository anchor; read the complete surrounding "
                 "function or documentation section before relying on it."
             ),
+            "citable": False,
             "_score": score,
         })
         if len(results) >= max(1, limit):
             break
     return results
+
+
+def _structural_exact_anchors(query: str, product: str, root: Path, limit: int) -> list[dict]:
+    """Return only structural matches for exact quoted phrases or UI labels."""
+    exact_phrases, _ = _exact_concepts(query, product)
+    if not exact_phrases:
+        return []
+    output = []
+    for record in _structural_index(root):
+        haystack = "{} {}".format(record["path"], record["text"])
+        if not any(_contains_phrase(haystack, phrase) for phrase in exact_phrases):
+            continue
+        output.append({
+            "id": "codebase.{}.{}.{}.{}".format(product, record["path"], record["line"], record["kind"]),
+            "product": product,
+            "source_type": "codebase_structure",
+            "source": "{}:{} ({})".format(record["path"], record["line"], record["kind"]),
+            "path": record["path"],
+            "line": record["line"],
+            "kind": record["kind"],
+            "fact": record["text"],
+            "answer_guidance": "Exact structural anchor; read the complete surrounding section before relying on it.",
+            "citable": False,
+        })
+        if len(output) >= max(1, limit):
+            break
+    return output
 
 
 def _candidate_reference_paths(root: Path, relative: str, text: str) -> list[str]:
@@ -496,6 +681,7 @@ def _reference_anchors(query: str, product: str, root: Path, initial: list[dict]
                 "line": anchor["line"],
                 "fact": anchor["text"],
                 "answer_guidance": "Referenced local file; inspect its complete relevant section and compare it with the originating file.",
+                "citable": False,
             })
             if len(output) >= max(1, limit):
                 return output
@@ -583,29 +769,31 @@ def _semantic_file_anchors(query: str, product: str, root: Path, limit: int) -> 
                 "Semantic repository anchor only; read the complete surrounding "
                 "documentation section or function before making a support claim."
             ),
+            "citable": False,
         })
     return output
 
 
-def search_codebase(query: str, product: str | None, limit: int = 32) -> list[dict]:
-    """Return many short, redacted excerpts for an agent research pass.
+def search_codebase(query: str, product: str | None, limit: int = 8) -> list[dict]:
+    """Return a small, ranked set of non-citable anchors for a read step.
 
-    This is intentionally exhaustive across matching files rather than a
-    single best-hit lookup. The caller still decides which excerpts belong in
-    the final answer, so the model can investigate broadly without receiving a
-    whole repository in one prompt.
+    Exact quoted phrases and configured UI labels are searched as indivisible
+    concepts first. Only when that phase finds nothing do broader workflow,
+    token, semantic, and structural searches run. The returned results are
+    navigation anchors, never final factual evidence.
     """
     root = _root_for(product)
     rg = _rg_path()
     if root is None or rg is None:
         return []
 
+    product = str(product or "").lower()
     results: list[dict] = []
     seen: set[str] = set()
 
     def run_patterns(patterns, per_pattern_limit=32):
         for pattern in patterns:
-            if len(results) >= min(64, max(1, limit)):
+            if len(results) >= 64:
                 break
             pattern_matches = 0
             args = [
@@ -656,41 +844,36 @@ def search_codebase(query: str, product: str | None, limit: int = 32) -> list[di
                     "path": relative,
                     "line": int(line_number),
                     "fact": safe_line,
-                    "answer_guidance": "Current implementation excerpt; use only for exact behavior directly supported by this line.",
+                    "answer_guidance": "Repository navigation anchor; read the complete surrounding section before making a factual claim.",
+                    "citable": False,
                 })
                 pattern_matches += 1
                 if pattern_matches >= max(1, per_pattern_limit):
                     break
-                if len(results) >= min(64, max(1, limit)):
+                if len(results) >= 64:
                     break
 
-    # Search the concrete terms the user supplied before generic phrases such
-    # as "Olympus wallet". Each token gets a small quota so one very common
-    # term cannot consume the entire packet. This is what lets a question
-    # about signing, trading, and deposit addresses reach its precise wallet
-    # documentation instead of unrelated product-name matches.
-    semantic = _semantic_file_anchors(query, str(product), root, limit=8)
-    # Search execution anchors before the user's natural-language phrasing.
-    # This keeps a generic "balance" match from crowding out the exact
-    # balance-check/retry/skip workflow that answers the question.
+    exact_phrases, _ = _exact_concepts(query, product)
+    run_patterns(exact_phrases, per_pattern_limit=24)
+    if results:
+        # Exact labels were found, so do not decompose them into broad token
+        # searches. Structural matches remain constrained to the same exact
+        # concepts (for example, a matching filename or settings symbol).
+        combined = results + _structural_exact_anchors(query, product, root, limit=16)
+        return _rank_and_diversify_anchors(query, product, root, combined, limit)
+
+    # Exact concepts were exhausted. Now broaden gradually: known workflow
+    # aliases, then meaningful user terms, then phrase/semantic fallbacks.
     run_patterns(_workflow_queries(query), per_pattern_limit=16)
     run_patterns(_priority_token_queries(query), per_pattern_limit=8)
     run_patterns(_queries(query), per_pattern_limit=8)
-    # A single generic word is too noisy. Use it only if no phrase search found
-    # anything, so a precise match such as "jup score" cannot be crowded out.
     if not results:
         run_patterns(_single_token_queries(query), per_pattern_limit=8)
-    structural = _structural_search(query, str(product), root, limit=max(8, min(24, limit)))
-    # Structural anchors get first chance to expose the surrounding workflow,
-    # while exact content matches remain available for the evidence reviewer.
-    combined = (semantic + results + structural)[:min(64, max(1, limit))]
-    combined.extend(_reference_anchors(query, str(product), root, combined, limit=8))
-    compact = combined[:min(72, max(1, limit + 8))]
-    for index, item in enumerate(compact, 1):
-        # A stable ordering score lets the model choose a bounded number of
-        # anchors without receiving whole matched source lines as search proof.
-        item["score"] = max(1, 100 - index)
-    return compact
+    semantic = _semantic_file_anchors(query, product, root, limit=12)
+    structural = _structural_search(query, product, root, limit=16)
+    combined = semantic + results + structural
+    combined.extend(_reference_anchors(query, product, root, combined, limit=8))
+    return _rank_and_diversify_anchors(query, product, root, combined, limit)
 
 
 def _safe_codebase_path(product: str | None, relative_path: str) -> tuple[Path, Path] | None:
@@ -778,6 +961,7 @@ def read_codebase_file(
         "line": start_line,
         "fact": "\n".join(rendered),
         "answer_guidance": "Read-only implementation context; use only behavior directly supported by these lines.",
+        "citable": True,
     }
 
 
@@ -867,6 +1051,7 @@ def read_codebase_section(
         "repository; use it for implementation behavior and compare against "
         "related frontend, backend, route, and documentation evidence when available."
     )
+    excerpt["citable"] = True
     return excerpt
 
 

@@ -3565,6 +3565,7 @@ def _final_evidence_packet(evidence, max_items):
     selected = [
         item for item in evidence
         if str(item.get("source_type") or "") in final_types
+        and item.get("citable", True) is not False
     ]
     return selected[:max(0, int(max_items))]
 
