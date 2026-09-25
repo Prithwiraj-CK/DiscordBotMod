@@ -311,6 +311,115 @@ def ask_json(system_prompt, messages, schema, name="structured_response", temper
     ) from last_error
 
 
+def ask_json_with_tools(system_prompt, messages, schema, tools, tool_executor,
+                        name="tool_research_response", max_tool_rounds=6,
+                        require_initial_tool=False):
+    """Run a bounded Responses API research loop and return its final JSON.
+
+    ``tool_executor`` is deliberately supplied by the caller.  This module
+    owns OpenAI transport/accounting only; the support bot owns the small,
+    read-only repository and knowledge tools it is willing to expose.  Each
+    model response (including reasoning items) is fed into the next turn with
+    its function-call outputs, which is the Responses API pattern required for
+    a reasoning model to continue an investigation rather than guess from a
+    single fixed evidence packet.
+    """
+    text_format = {
+        "type": "json_schema",
+        "name": name,
+        "strict": True,
+        "schema": schema,
+    }
+    try:
+        rounds = min(10, max(1, int(max_tool_rounds)))
+    except (TypeError, ValueError):
+        rounds = 6
+
+    input_items = _response_input(messages)
+    model = _model_name()
+    last_error = None
+    for round_number in range(rounds + 1):
+        # A product question must begin with a search, while greetings can
+        # still receive a normal short reply. Subsequent turns stay automatic
+        # so Luna can decide whether another file needs to be opened.
+        tool_choice = "required" if round_number == 0 and require_initial_tool else "auto"
+        try:
+            response = _get_client().responses.create(
+                model=model,
+                instructions=system_prompt,
+                input=input_items,
+                tools=tools,
+                tool_choice=tool_choice,
+                parallel_tool_calls=False,
+                max_output_tokens=_json_max_output_tokens(),
+                reasoning={"effort": _reasoning_effort()},
+                text={"format": text_format},
+                store=False,
+            )
+            _record_response_usage(response, model)
+        except openai.AuthenticationError as exc:
+            raise LLMUnavailable("OpenAI rejected the API key: {}".format(exc)) from exc
+        except openai.BadRequestError as exc:
+            raise LLMUnavailable("OpenAI rejected the tool research request: {}".format(exc)) from exc
+        except _RETRYABLE as exc:
+            last_error = exc
+            if round_number >= rounds:
+                break
+            delay = _retry_delay(round_number + 1)
+            log.warning("Tool research request failed: %s. Retrying in %.1fs", type(exc).__name__, delay)
+            time.sleep(delay)
+            continue
+
+        function_calls = [
+            item for item in (getattr(response, "output", None) or [])
+            if getattr(item, "type", None) == "function_call"
+        ]
+        if not function_calls:
+            content = (response.output_text or "").strip()
+            if not content:
+                raise LLMUnavailable("OpenAI ended the research loop without a final response")
+            try:
+                value = json.loads(content)
+            except ValueError as exc:
+                raise LLMUnavailable("OpenAI returned invalid tool-loop JSON") from exc
+            if not isinstance(value, dict):
+                raise LLMUnavailable("OpenAI tool-loop JSON was not an object")
+            log.info("Tool research completed after %s tool round(s)", round_number)
+            return value
+
+        if round_number >= rounds:
+            raise LLMUnavailable("Research tool budget was exhausted before Luna produced an answer")
+
+        log.info(
+            "Tool research round %s/%s: %s",
+            round_number + 1, rounds,
+            ", ".join(str(getattr(call, "name", "unknown")) for call in function_calls),
+        )
+
+        # The SDK's Response output objects are valid input items. Keeping all
+        # of them (especially reasoning items) is important: omitting them
+        # makes later tool calls lose the model's investigation state.
+        input_items.extend(getattr(response, "output", None) or [])
+        for call in function_calls:
+            try:
+                arguments = json.loads(getattr(call, "arguments", "{}") or "{}")
+                if not isinstance(arguments, dict):
+                    raise ValueError("arguments were not an object")
+                result = tool_executor(str(getattr(call, "name", "")), arguments)
+            except Exception as exc:  # The model receives a bounded tool error and can recover.
+                log.warning("Research tool %s failed: %s", getattr(call, "name", "unknown"), exc)
+                result = {"error": "The requested research tool was unavailable for this step."}
+            input_items.append({
+                "type": "function_call_output",
+                "call_id": str(getattr(call, "call_id", "")),
+                "output": json.dumps(result, ensure_ascii=False),
+            })
+
+    raise LLMUnavailable(
+        "Tool research unavailable: {}".format(last_error or "research loop did not finish")
+    )
+
+
 # To move to Claude, swap the body above for this and set ANTHROPIC_API_KEY:
 #
 #     from anthropic import Anthropic

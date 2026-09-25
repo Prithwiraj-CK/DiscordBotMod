@@ -234,6 +234,7 @@ class RepositoryReasoningTests(unittest.TestCase):
     @patch("bot.retrieve_facts", return_value=[])
     @patch("bot.read_codebase_section")
     @patch("bot.search_codebase")
+    @patch("bot.ask_json_with_tools")
     @patch("bot.ask_json")
     @patch("bot.CODEBASE_SEARCH_ENABLED", True)
     @patch("bot.APPROVED_FACTS_ENABLED", False)
@@ -241,6 +242,7 @@ class RepositoryReasoningTests(unittest.TestCase):
     def test_luna_pipeline_does_not_post_a_loose_staff_reply(
         self,
         mocked_ask,
+        mocked_agent,
         mocked_search,
         mocked_read,
         mocked_facts,
@@ -308,6 +310,27 @@ class RepositoryReasoningTests(unittest.TestCase):
             }
 
         mocked_ask.side_effect = model_result
+
+        def agent_result(system_prompt, messages, schema, tools, executor, **kwargs):
+            del system_prompt, messages, schema, tools, kwargs
+            tool_result = executor("search_repository", {
+                "product": "valhalla", "query": question, "limit": 8,
+            })
+            self.assertTrue(tool_result["results"])
+            executor("read_repository_section", {
+                "product": "valhalla", "path": source["path"], "line": source["line"],
+            })
+            answer = (
+                "The lead wallet transaction is processed first. Valhalla then "
+                "queues the copying wallet's position from that observed event."
+            )
+            return {
+                "action": "answer", "evidence_ids": [source["id"]],
+                "claim_evidence": [{"claim": answer, "evidence_ids": [source["id"]]}],
+                "missing_information": [], "draft_answer": answer,
+            }
+
+        mocked_agent.side_effect = agent_result
         turns = [
             {"role": "user", "content": "Billi: older question {}".format(index)}
             for index in range(5)
@@ -318,11 +341,7 @@ class RepositoryReasoningTests(unittest.TestCase):
         self.assertEqual("answer", result["action"])
         self.assertIn("processed first", result["draft_answer"])
         self.assertNotIn("close that position", result["draft_answer"])
-        final_prompt = next(
-            call.args[0] for call in mocked_ask.call_args_list
-            if call.kwargs.get("name") == "support_luna_final"
-        )
-        self.assertIn("never evidence", final_prompt.lower())
+        self.assertEqual(1, mocked_agent.call_count)
 
 
 if __name__ == "__main__":

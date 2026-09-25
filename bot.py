@@ -57,7 +57,7 @@ from knowledge import (
     history_prompt, load_knowledge, notes_prompt, retrieve_facts,
     retrieve_history, retrieve_notes,
 )
-from llm import ask_json
+from llm import LLMUnavailable, ask_json, ask_json_with_tools
 from support_pipeline import (
     analysis_log, calculate_support_values, detect_product_feature,
     extract_question, format_calculation_response, rank_evidence,
@@ -1574,7 +1574,7 @@ _INTENT_HINTS = (
     (re.compile(r"\b(jupiter score|pumpfun|stonkfun|safety rail)\b", re.IGNORECASE), "risk_controls"),
     (re.compile(r"\b(damm|dlmm|copy trade|copy trading|follow(ed)? wallet)\b", re.IGNORECASE), "copy_trading"),
     (re.compile(r"\b(profit|profitable|returns|gains|make money)\b", re.IGNORECASE), "performance"),
-    (re.compile(r"\b(imported wallet|gasless|eoa|safe|pol|signing address|trading address)\b", re.IGNORECASE), "wallets"),
+    (re.compile(r"\b(imported wallet|gasless|eoa|safe|pol|signing address|trading address|deposit address|deposit wallet)\b", re.IGNORECASE), "wallets"),
     (re.compile(r"\b(limit placed|partial fill|copied|order status|open orders)\b", re.IGNORECASE), "orders"),
     (re.compile(r"\b(sports?|moneyline|game view|game|market)\b", re.IGNORECASE), "sports"),
     (re.compile(r"\b(dimes|leverage|closing)\b", re.IGNORECASE), "leverage"),
@@ -3271,7 +3271,8 @@ def _decision(action, product, intent, answer, evidence_ids=None,
     }
 
 
-def _validate_luna_draft(query, product, feature, facts, draft, turns, calculation=None):
+def _validate_luna_draft(query, product, feature, facts, draft, turns, calculation=None,
+                         allow_correction=True):
     """Audit once and give Luna one evidence-bounded correction opportunity."""
     answer = str(draft.get("draft_answer") or "").strip()
     if not facts or not answer or draft.get("action") not in {"answer", "clarify"}:
@@ -3312,6 +3313,12 @@ def _validate_luna_draft(query, product, feature, facts, draft, turns, calculati
     if not failures:
         return draft, []
 
+    # The tool-driven path needs concrete validation feedback, then must go
+    # back to research.  A rewrite against the same evidence packet was the
+    # previous failure mode and is retained only for the legacy audit path.
+    if not allow_correction:
+        return draft, failures
+
     correction_prompt = LUNA_SUPPORT_SYSTEM + _evidence_text(facts)
     correction_prompt += (
         "\n\nVALIDATION CORRECTION\n"
@@ -3334,6 +3341,278 @@ def _validate_luna_draft(query, product, feature, facts, draft, turns, calculati
     return corrected, failures
 
 
+# Luna receives these tools rather than a pre-ranked evidence packet.  The
+# functions below are intentionally read-only and root-confined: the model can
+# search and open product material, but can never execute a command, inspect a
+# secret, access Discord directly, or write into either repository.
+LUNA_RESEARCH_TOOLS = [
+    {
+        "type": "function",
+        "name": "search_repository",
+        "description": (
+            "Search the current Olympus or Valhalla repository by user wording, "
+            "feature terms, filenames, symbols, routes, commands, and documentation headings. "
+            "Use this before answering implementation or workflow questions."
+        ),
+        "parameters": {
+            "type": "object", "additionalProperties": False,
+            "properties": {
+                "product": {"type": "string", "enum": ["olympus", "valhalla"]},
+                "query": {"type": "string", "minLength": 1, "maxLength": 320},
+                "limit": {"type": "integer", "minimum": 1, "maximum": 20},
+            },
+            "required": ["product", "query", "limit"],
+        },
+    },
+    {
+        "type": "function",
+        "name": "read_repository_section",
+        "description": (
+            "Read the complete relevant documentation heading, function, class, route, or workflow "
+            "around a repository search result. Use this to verify behavior; search snippets alone are not proof."
+        ),
+        "parameters": {
+            "type": "object", "additionalProperties": False,
+            "properties": {
+                "product": {"type": "string", "enum": ["olympus", "valhalla"]},
+                "path": {"type": "string", "minLength": 1, "maxLength": 500},
+                "line": {"type": "integer", "minimum": 1, "maximum": 100000},
+            },
+            "required": ["product", "path", "line"],
+        },
+    },
+    {
+        "type": "function",
+        "name": "read_repository_file",
+        "description": (
+            "Read a bounded explicit line range when a complete function or workflow spans more than one section."
+        ),
+        "parameters": {
+            "type": "object", "additionalProperties": False,
+            "properties": {
+                "product": {"type": "string", "enum": ["olympus", "valhalla"]},
+                "path": {"type": "string", "minLength": 1, "maxLength": 500},
+                "start_line": {"type": "integer", "minimum": 1, "maximum": 100000},
+                "end_line": {"type": "integer", "minimum": 1, "maximum": 100000},
+            },
+            "required": ["product", "path", "start_line", "end_line"],
+        },
+    },
+    {
+        "type": "function",
+        "name": "search_approved_facts",
+        "description": (
+            "Search verified product facts. Use this for fees, security, privacy, product promises, and official policy. "
+            "These facts outrank repository inference when they conflict."
+        ),
+        "parameters": {
+            "type": "object", "additionalProperties": False,
+            "properties": {
+                "product": {"type": "string", "enum": ["olympus", "valhalla"]},
+                "query": {"type": "string", "minLength": 1, "maxLength": 320},
+                "intent": {"type": "string", "maxLength": 80},
+            },
+            "required": ["product", "query", "intent"],
+        },
+    },
+    {
+        "type": "function",
+        "name": "search_staff_examples",
+        "description": (
+            "Search past staff replies only to resolve product terminology or learn a helpful support style. "
+            "Never cite or treat these examples as proof of current product behavior."
+        ),
+        "parameters": {
+            "type": "object", "additionalProperties": False,
+            "properties": {
+                "product": {"type": "string", "enum": ["olympus", "valhalla"]},
+                "query": {"type": "string", "minLength": 1, "maxLength": 320},
+            },
+            "required": ["product", "query"],
+        },
+    },
+]
+
+LUNA_TOOL_RESEARCH_SYSTEM = LUNA_SUPPORT_SYSTEM + """
+
+RESEARCH WORKFLOW
+You are the final support researcher and writer. Your research is internal.
+For every factual Olympus or Valhalla question, search the approved facts and
+the relevant repository before answering. Search both products if the question
+is ambiguous; do not make the user choose when the surrounding conversation or
+research resolves it. Read complete documentation sections or implementation
+functions before relying on a search result. Follow references or search again
+when the first material does not answer every part of the question.
+
+Do not mention code, files, repository searches, sources, evidence, citations,
+or uncertainty about what you found in the user-facing answer. Reply like a
+helpful experienced moderator: direct, natural, and specific. Never say "I
+found in the code", "the evidence says", or describe this tool workflow.
+
+Use `evidence_ids` and `claim_evidence` only as private audit metadata. Every
+factual claim must use IDs returned by search_approved_facts or a repository
+read tool. Search-result IDs alone are anchors, not proof: read the relevant
+section before citing a repository claim. Staff examples may help route the
+question but must never be cited as proof.
+
+If a validator reports a problem, perform fresh research targeted at that
+problem and then write a replacement answer. Do not merely rewrite the old
+answer. Only use a short handoff after the permitted research genuinely cannot
+answer a question safely.
+"""
+
+
+def _tool_evidence_payload(item):
+    """Keep model tool outputs compact while preserving an auditable record."""
+    return {
+        key: item.get(key)
+        for key in (
+            "id", "product", "source_type", "source", "path", "line", "fact",
+            "answer_guidance", "links", "action",
+        )
+        if item.get(key) not in (None, "", [], {})
+    }
+
+
+def _luna_tool_research_decision(query, turns, product_hint=None, force_reply=False):
+    """Use a multi-turn Luna/tool loop; validation failures start new research."""
+    if force_reply and _is_social_smalltalk(query):
+        return _decision("answer", product_hint or "generic", "social", _social_reply(query), confidence=1.0)
+    if _requires_account_handoff(query):
+        return _decision("escalate", product_hint or "unknown", "support_triage", ESCALATE, confidence=1.0)
+
+    context_turns = _luna_conversation_window(turns)
+    resolved_query = _resolve_follow_up_question(query, context_turns)
+    detection = detect_product_feature(resolved_query, prior_product=product_hint)
+    product = product_hint if product_hint in {"olympus", "valhalla"} else (
+        detection.get("product") if detection.get("product") in {"olympus", "valhalla"}
+        else _context_product_hint(resolved_query, context_turns)
+    )
+    intent = _intent_hint(resolved_query) or "unknown"
+    collected = OrderedDict()
+    staff_examples = []
+
+    def remember(items):
+        for item in items:
+            evidence_id = str(item.get("id") or "")
+            if evidence_id:
+                collected[evidence_id] = item
+
+    def execute_tool(name, arguments):
+        selected_product = str(arguments.get("product") or "")
+        if selected_product not in {"olympus", "valhalla"}:
+            return {"error": "Choose olympus or valhalla."}
+        tool_query = str(arguments.get("query") or resolved_query).strip()[:320]
+        if name == "search_repository":
+            hits = search_codebase(tool_query, selected_product, limit=min(20, max(1, int(arguments.get("limit", 12)))))
+            remember(hits)
+            return {"results": [_tool_evidence_payload(item) for item in hits]}
+        if name == "read_repository_section":
+            item = read_codebase_section(selected_product, str(arguments.get("path") or ""), int(arguments.get("line", 1)))
+            if item:
+                remember([item])
+                return {"result": _tool_evidence_payload(item)}
+            return {"error": "That repository section was not available."}
+        if name == "read_repository_file":
+            start = int(arguments.get("start_line", 1))
+            end = int(arguments.get("end_line", start))
+            if end < start or end - start > 249:
+                return {"error": "Choose a valid bounded range of at most 250 lines."}
+            item = read_codebase_file(selected_product, str(arguments.get("path") or ""), start, end)
+            if item:
+                remember([item])
+                return {"result": _tool_evidence_payload(item)}
+            return {"error": "That repository range was not available."}
+        if name == "search_approved_facts":
+            if not APPROVED_FACTS_ENABLED:
+                return {"results": [], "notice": "Approved facts are currently disabled."}
+            facts = retrieve_facts(tool_query, product=selected_product, intent=str(arguments.get("intent") or intent), limit=12)
+            remember(facts)
+            return {"results": [_tool_evidence_payload(item) for item in facts]}
+        if name == "search_staff_examples":
+            examples = retrieve_history(tool_query, product=selected_product, limit=6)
+            staff_examples.extend(examples)
+            return {"examples": [
+                {"product": item.get("product"), "question_context": item.get("question_context"), "content": item.get("content")}
+                for item in examples
+            ]}
+        return {"error": "Unknown research tool."}
+
+    factual_question = _asks_something(resolved_query) and not _is_social_smalltalk(resolved_query)
+    base_prompt = (
+        "CURRENT USER QUESTION:\n{}\n\nRESOLVED CONVERSATION QUESTION:\n{}\n"
+        "Initial product hint: {}\nInitial intent hint: {}\n"
+        "Use the conversation only to understand context; the latest question is the task."
+    ).format(query, resolved_query, product or "unknown", intent)
+    agent_turns = list(context_turns) + [{"role": "user", "content": base_prompt}]
+    max_rounds = _env_int("LUNA_RESEARCH_MAX_TOOL_ROUNDS", 6)
+
+    for research_attempt in range(2):
+        try:
+            draft = ask_json_with_tools(
+                LUNA_TOOL_RESEARCH_SYSTEM,
+                agent_turns,
+                DRAFT_SCHEMA,
+                LUNA_RESEARCH_TOOLS,
+                execute_tool,
+                name="support_luna_tool_research",
+                max_tool_rounds=max_rounds,
+                require_initial_tool=factual_question,
+            )
+        except LLMUnavailable as exc:
+            log.warning("Luna tool research unavailable: %s", exc)
+            return _decision("escalate", product or "unknown", intent, ESCALATE, confidence=0.0)
+
+        action = str(draft.get("action") or "")
+        if force_reply and action == "ignore":
+            draft.update({"action": "clarify", "draft_answer": "What would you like help with?", "evidence_ids": [], "claim_evidence": []})
+            action = "clarify"
+        evidence = list(collected.values())
+        valid_ids = {str(item.get("id") or "") for item in evidence}
+        used_ids = _normalise_draft_evidence(draft)
+        answer = str(draft.get("draft_answer") or "").strip()
+        needs_evidence = factual_question and action == "answer"
+        failures = []
+        if action not in {"answer", "clarify", "escalate", "ignore"} or not answer and action in {"answer", "clarify"}:
+            failures.append("The response action or answer was invalid.")
+        if not used_ids.issubset(valid_ids):
+            failures.append("The answer cited evidence outside this research session.")
+        if needs_evidence and not used_ids:
+            failures.append("A factual answer needs evidence from the current research session.")
+        if action in {"answer", "clarify"} and not failures:
+            try:
+                _, validation_failures = _validate_luna_draft(
+                    query, product or "unknown", detection.get("feature"), evidence, draft, context_turns,
+                    allow_correction=False,
+                )
+                # The validator's legacy correction is deliberately not used here:
+                # feedback must send Luna back through tools, not just another rewrite.
+                failures.extend(validation_failures)
+            except Exception as exc:
+                log.warning("Luna tool-loop validation unavailable: %s", exc)
+                failures.append("The answer could not be validated.")
+        if not failures:
+            if action == "ignore":
+                return _decision("ignore", product or "generic", intent, IGNORE, confidence=0.8)
+            if action == "escalate":
+                return _decision("escalate", product or "unknown", intent, ESCALATE, evidence_ids=used_ids)
+            return _decision(action, product or "unknown", intent, answer, evidence_ids=used_ids,
+                             missing_information=draft.get("missing_information", []))
+
+        log.info("Luna tool-loop validation requires more research: %s", failures)
+        if research_attempt == 0:
+            agent_turns.append({"role": "user", "content": (
+                "VALIDATION FEEDBACK: {}\nResearch again with the tools, especially complete "
+                "repository sections needed to answer the question. Then return a new moderator "
+                "answer. Do not describe the research to the user."
+            ).format("; ".join(dict.fromkeys(failures)))})
+            continue
+        return _decision("escalate", product or "unknown", intent, ESCALATE,
+                         evidence_ids=used_ids & valid_ids, unsupported_claims=failures, confidence=0.0)
+
+    return _decision("escalate", product or "unknown", intent, ESCALATE, confidence=0.0)
+
+
 def autonomous_decision(query, turns, product_hint=None, force_reply=False):
     """Research both current repositories, then let Luna make one final decision.
 
@@ -3343,11 +3622,12 @@ def autonomous_decision(query, turns, product_hint=None, force_reply=False):
     keeps retrieval bounded and safe, but Luna alone selects and writes the
     final response from the completed evidence packet.
     """
-    if force_reply and _is_social_smalltalk(query):
-        return _decision(
-            "answer", product_hint or "generic", "social", _social_reply(query),
-            confidence=1.0,
-        )
+    # Luna now owns the investigation itself through the bounded read-only
+    # tool loop above. The older one-shot collector remains below temporarily
+    # for audit history, but is intentionally unreachable in live support.
+    return _luna_tool_research_decision(
+        query, turns, product_hint=product_hint, force_reply=force_reply,
+    )
 
     context_turns = _luna_conversation_window(turns)
     resolved_query = _resolve_follow_up_question(query, context_turns)
