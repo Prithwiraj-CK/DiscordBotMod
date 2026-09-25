@@ -160,6 +160,13 @@ class RepositoryReasoningTests(unittest.TestCase):
         self.assertIn("resolved market", answer)
         self.assertIn("USDC", answer)
 
+    def test_wallet_address_roles_include_the_default_deposit_mapping(self):
+        question = "Why does a new Olympus wallet have signing, trading, and deposit addresses?"
+        facts = retrieve_facts(question, product="olympus", intent="wallets", limit=10)
+        fact = next(item for item in facts if item["id"] == "olympus.wallets.address_roles")
+        self.assertIn("deposit wallet address", fact["fact"])
+        self.assertIn("signing address authorizes", fact["answer_guidance"])
+
     def test_matching_staff_answer_is_general_evidence_not_raw_history(self):
         evidence = _staff_history_evidence(
             "What does redeemed mean in Olympus?",
