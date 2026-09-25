@@ -552,6 +552,45 @@ DRAFT_SCHEMA = {
     "required": ["action", "evidence_ids", "claim_evidence", "missing_information", "draft_answer"],
 }
 
+# The live researcher has a stricter final-answer contract than the dormant
+# legacy drafting path.  It must account privately for every part of the
+# question against the *selected* evidence packet before an answer can leave
+# the service.  This keeps a plausible partial answer from being presented as
+# a complete support answer.
+RESEARCH_DRAFT_SCHEMA = {
+    "type": "object",
+    "additionalProperties": False,
+    "properties": {
+        **DRAFT_SCHEMA["properties"],
+        "coverage": {
+            "type": "object",
+            "additionalProperties": False,
+            "properties": {
+                "complete": {"type": "boolean"},
+                "uncovered_parts": {"type": "array", "items": {"type": "string"}, "maxItems": 8},
+                "part_evidence": {
+                    "type": "array",
+                    "minItems": 1,
+                    "maxItems": 8,
+                    "items": {
+                        "type": "object",
+                        "additionalProperties": False,
+                        "properties": {
+                            "part": {"type": "string", "minLength": 1, "maxLength": 320},
+                            "evidence_ids": {"type": "array", "items": {"type": "string"}, "minItems": 1},
+                        },
+                        "required": ["part", "evidence_ids"],
+                    },
+                },
+            },
+            "required": ["complete", "uncovered_parts", "part_evidence"],
+        },
+    },
+    "required": [
+        "action", "evidence_ids", "claim_evidence", "missing_information", "draft_answer", "coverage",
+    ],
+}
+
 VALIDATION_SCHEMA = {
     "type": "object",
     "additionalProperties": False,
@@ -3469,9 +3508,17 @@ read tool. Search-result IDs alone are anchors, not proof: read the relevant
 section before citing a repository claim. Stored conversation context may help
 route the question but must never be cited as proof.
 
+Before returning a final answer, populate `coverage.part_evidence` with every
+distinct factual, operational, conditional, or comparison part the user asked
+about, and attach selected evidence IDs to each part. Mark `coverage.complete`
+true only when every part is covered. If any required part is not covered by
+the selected packet, list it in `coverage.uncovered_parts`, mark complete
+false, and choose action=escalate. Never fill in a gap from general knowledge
+or a search-result preview.
+
 There are at most two discovery calls and two read calls. After them, assess
 coverage and return the final JSON answer; do not keep searching. Only use a
-short handoff for a true account-specific or security incident.
+short handoff for an account-specific/security incident or incomplete evidence.
 """
 
 
@@ -3520,6 +3567,53 @@ def _final_evidence_packet(evidence, max_items):
         if str(item.get("source_type") or "") in final_types
     ]
     return selected[:max(0, int(max_items))]
+
+
+def _coverage_failures(draft, valid_ids, factual_question):
+    """Return mechanical coverage failures for a researched final answer.
+
+    Luna identifies the semantic parts of a natural-language question, while
+    this gate verifies the non-negotiable pieces deterministically: every
+    listed part must be backed by selected evidence, and the model may not
+    claim complete coverage while also identifying a missing part.
+    """
+    if not factual_question:
+        return []
+    action = str(draft.get("action") or "")
+    coverage = draft.get("coverage")
+    # An explicit incomplete assessment is authoritative for *any* response
+    # action.  In particular, it must win over the old generic-question retry
+    # rule when Luna has already determined that the selected packet is not
+    # sufficient to answer safely.
+    if isinstance(coverage, dict) and (
+        coverage.get("complete") is not True or coverage.get("uncovered_parts")
+    ):
+        return ["Selected evidence does not cover every part of the question."]
+    if action != "answer":
+        return []
+    if not isinstance(coverage, dict):
+        return ["The final answer did not provide an evidence coverage assessment."]
+    parts = coverage.get("part_evidence")
+    uncovered = coverage.get("uncovered_parts")
+    failures = []
+    if not isinstance(parts, list) or not parts:
+        failures.append("The final answer did not map every question part to evidence.")
+        parts = []
+    if not isinstance(uncovered, list):
+        failures.append("The final answer returned an invalid uncovered-parts list.")
+        uncovered = []
+    if uncovered:
+        failures.append("Selected evidence leaves required question parts uncovered.")
+    for item in parts:
+        if not isinstance(item, dict) or not str(item.get("part") or "").strip():
+            failures.append("The final answer returned an invalid question-part coverage entry.")
+            continue
+        evidence_ids = {str(value) for value in item.get("evidence_ids") or [] if value}
+        if not evidence_ids:
+            failures.append("A question part had no selected evidence.")
+        elif not evidence_ids.issubset(valid_ids):
+            failures.append("A question part cited evidence outside the selected packet.")
+    return list(dict.fromkeys(failures))
 
 
 def _deterministic_research_failures(query, draft, valid_ids, factual_question):
@@ -3671,10 +3765,11 @@ def _luna_tool_research_decision(query, turns, product_hint=None, force_reply=Fa
             return ask_json(
                 LUNA_SUPPORT_SYSTEM + _evidence_text(evidence) + "\n\nFINAL ANSWER REQUIRED\n"
                 + instruction
-                + " Return action=answer unless this is a true account or security incident. "
+                + " Return action=answer only when the selected evidence covers every part of the question; "
+                "otherwise return action=escalate. "
                 "Do not mention research, code, files, or evidence to the user. Cite only supplied IDs.",
                 agent_turns,
-                DRAFT_SCHEMA,
+                RESEARCH_DRAFT_SCHEMA,
                 name="support_luna_research_finalization",
                 temperature=0.0,
             )
@@ -3689,7 +3784,7 @@ def _luna_tool_research_decision(query, turns, product_hint=None, force_reply=Fa
         draft = ask_json_with_tools(
             LUNA_TOOL_RESEARCH_SYSTEM,
             agent_turns,
-            DRAFT_SCHEMA,
+            RESEARCH_DRAFT_SCHEMA,
             LUNA_RESEARCH_TOOLS,
             execute_tool,
             name="support_luna_tool_research",
@@ -3720,6 +3815,18 @@ def _luna_tool_research_decision(query, turns, product_hint=None, force_reply=Fa
         action = "clarify"
     evidence = _final_evidence_packet(list(collected.values()), budget.max_evidence_items)
     valid_ids = {str(item.get("id") or "") for item in evidence}
+    coverage_failures = _coverage_failures(draft, valid_ids, factual_question)
+    if coverage_failures:
+        coverage = draft.get("coverage") if isinstance(draft.get("coverage"), dict) else {}
+        missing = [str(value) for value in coverage.get("uncovered_parts") or [] if str(value).strip()]
+        budget.note_stop("no_progress", replace=True)
+        return _decision(
+            "escalate", product or "unknown", intent, ESCALATE,
+            evidence_ids=valid_ids,
+            missing_information=missing or ["evidence incomplete for the full question"],
+            unsupported_claims=coverage_failures,
+            confidence=0.0,
+        )
     failures, used_ids = _deterministic_research_failures(query, draft, valid_ids, factual_question)
     answer = str(draft.get("draft_answer") or "").strip()
     if failures and evidence:

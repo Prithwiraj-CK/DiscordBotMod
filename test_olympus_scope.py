@@ -65,6 +65,14 @@ class OlympusScopeTests(unittest.TestCase):
                 }],
                 "missing_information": [],
                 "draft_answer": answer,
+                "coverage": {
+                    "complete": True,
+                    "uncovered_parts": [],
+                    "part_evidence": [{
+                        "part": "the user's Olympus support question",
+                        "evidence_ids": [OLYMPUS_SECTION["id"]],
+                    }],
+                },
             }
         return agent
 

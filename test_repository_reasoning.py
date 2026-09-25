@@ -339,6 +339,14 @@ class RepositoryReasoningTests(unittest.TestCase):
                 "claim_evidence": [{"claim": answer, "evidence_ids": [source["id"]]}],
                 "missing_information": [],
                 "draft_answer": answer,
+                "coverage": {
+                    "complete": True,
+                    "uncovered_parts": [],
+                    "part_evidence": [{
+                        "part": "whether the lead wallet is processed before the copied position",
+                        "evidence_ids": [source["id"]],
+                    }],
+                },
             }
 
         mocked_ask.side_effect = model_result
@@ -364,6 +372,14 @@ class RepositoryReasoningTests(unittest.TestCase):
                 "action": "answer", "evidence_ids": [source["id"]],
                 "claim_evidence": [{"claim": answer, "evidence_ids": [source["id"]]}],
                 "missing_information": [], "draft_answer": answer,
+                "coverage": {
+                    "complete": True,
+                    "uncovered_parts": [],
+                    "part_evidence": [{
+                        "part": "whether the lead wallet is processed before the copied position",
+                        "evidence_ids": [source["id"]],
+                    }],
+                },
             }
 
         mocked_agent.side_effect = agent_result
