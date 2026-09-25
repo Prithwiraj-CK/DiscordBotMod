@@ -345,6 +345,10 @@ class RepositoryReasoningTests(unittest.TestCase):
 
         def agent_result(system_prompt, messages, schema, tools, executor, **kwargs):
             del system_prompt, messages, schema, tools, kwargs
+            facts_result = executor("search_approved_facts", {
+                "product": "valhalla", "query": question, "intent": "unknown",
+            })
+            self.assertEqual([], facts_result["results"])
             tool_result = executor("search_repository", {
                 "product": "valhalla", "query": question, "limit": 8,
             })

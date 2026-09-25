@@ -338,7 +338,7 @@ def ask_json_with_tools(system_prompt, messages, schema, tools, tool_executor,
     input_items = _response_input(messages)
     model = _model_name()
     last_error = None
-    for round_number in range(rounds + 1):
+    for round_number in range(rounds):
         # A product question must begin with a search, while greetings can
         # still receive a normal short reply. Subsequent turns stay automatic
         # so Luna can decide whether another file needs to be opened.
@@ -412,7 +412,7 @@ def ask_json_with_tools(system_prompt, messages, schema, tools, tool_executor,
                 "output": json.dumps(result, ensure_ascii=False),
             })
 
-        if round_number >= rounds:
+        if round_number == rounds - 1:
             # The model has completed the allowed research budget. Its final
             # request intentionally has no tools, so it must synthesize the
             # evidence it already gathered rather than turn a well-researched

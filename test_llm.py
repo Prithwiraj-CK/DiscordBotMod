@@ -62,11 +62,9 @@ class LlmTests(unittest.TestCase):
 
     def test_tool_loop_finalizes_when_research_budget_is_used(self):
         first_call = SimpleNamespace(type="function_call", name="search_repository", call_id="call_1", arguments="{}")
-        second_call = SimpleNamespace(type="function_call", name="search_repository", call_id="call_2", arguments="{}")
         responses = Mock()
         responses.create.side_effect = [
             SimpleNamespace(output=[first_call], output_text="", usage=None),
-            SimpleNamespace(output=[second_call], output_text="", usage=None),
             SimpleNamespace(output=[], output_text='{"answer":"researched"}', usage=None),
         ]
         client = SimpleNamespace(responses=responses)
@@ -82,7 +80,7 @@ class LlmTests(unittest.TestCase):
             )
 
         self.assertEqual({"answer": "researched"}, value)
-        self.assertEqual(3, responses.create.call_count)
+        self.assertEqual(2, responses.create.call_count)
         self.assertNotIn("tools", responses.create.call_args.kwargs)
 
 

@@ -3437,12 +3437,13 @@ LUNA_TOOL_RESEARCH_SYSTEM = LUNA_SUPPORT_SYSTEM + """
 
 RESEARCH WORKFLOW
 You are the final support researcher and writer. Your research is internal.
-For every factual Olympus or Valhalla question, search the approved facts and
-the relevant repository before answering. Search both products if the question
-is ambiguous; do not make the user choose when the surrounding conversation or
-research resolves it. Read complete documentation sections or implementation
-functions before relying on a search result. Follow references or search again
-when the first material does not answer every part of the question.
+For every factual Olympus or Valhalla question, use this exact state machine:
+(1) discover: search approved facts and the relevant repository; (2) read: open
+the one or two strongest complete sections; (3) assess whether those sections
+cover every part of the question; (4) answer. Search both products if the
+question is ambiguous. Do not make the user choose when surrounding context or
+research resolves it. If the material genuinely lacks a required part, use the
+remaining permitted discovery/read call specifically for that gap.
 
 Do not mention code, files, repository searches, sources, evidence, citations,
 or uncertainty about what you found in the user-facing answer. Reply like a
@@ -3452,13 +3453,12 @@ found in the code", "the evidence says", or describe this tool workflow.
 Use `evidence_ids` and `claim_evidence` only as private audit metadata. Every
 factual claim must use IDs returned by search_approved_facts or a repository
 read tool. Search-result IDs alone are anchors, not proof: read the relevant
-section before citing a repository claim. Staff examples may help route the
-question but must never be cited as proof.
+section before citing a repository claim. Stored conversation context may help
+route the question but must never be cited as proof.
 
-If a validator reports a problem, perform fresh research targeted at that
-problem and then write a replacement answer. Do not merely rewrite the old
-answer. Only use a short handoff after the permitted research genuinely cannot
-answer a question safely.
+There are at most two discovery calls and two read calls. After them, assess
+coverage and return the final JSON answer; do not keep searching. Only use a
+short handoff for a true account-specific or security incident.
 """
 
 
@@ -3500,7 +3500,7 @@ def _deterministic_research_failures(query, draft, valid_ids, factual_question):
 
 
 def _luna_tool_research_decision(query, turns, product_hint=None, force_reply=False):
-    """Use a multi-turn Luna/tool loop; validation failures start new research."""
+    """Run one bounded discover → read → assess → answer investigation."""
     if force_reply and _is_social_smalltalk(query):
         return _decision("answer", product_hint or "generic", "social", _social_reply(query), confidence=1.0)
     if _requires_account_handoff(query):
@@ -3515,7 +3515,7 @@ def _luna_tool_research_decision(query, turns, product_hint=None, force_reply=Fa
     )
     intent = _intent_hint(resolved_query) or "unknown"
     collected = OrderedDict()
-    staff_examples = []
+    research_state = {"discoveries": 0, "reads": 0}
 
     def remember(items):
         for item in items:
@@ -3528,17 +3528,34 @@ def _luna_tool_research_decision(query, turns, product_hint=None, force_reply=Fa
         if selected_product not in {"olympus", "valhalla"}:
             return {"error": "Choose olympus or valhalla."}
         tool_query = str(arguments.get("query") or resolved_query).strip()[:320]
+        discovery_order = ("search_approved_facts", "search_repository")
+        if research_state["discoveries"] < len(discovery_order):
+            required = discovery_order[research_state["discoveries"]]
+            if name != required:
+                return {
+                    "error": "Discovery stage {} requires {} next. Do not read or search anything else yet."
+                    .format(research_state["discoveries"] + 1, required)
+                }
+        elif name in discovery_order or name == "search_staff_examples":
+            return {"error": "Discovery is complete. Read the strongest collected section or return the final answer."}
         if name == "search_repository":
+            research_state["discoveries"] += 1
             hits = search_codebase(tool_query, selected_product, limit=min(20, max(1, int(arguments.get("limit", 12)))))
             remember(hits)
             return {"results": [_tool_evidence_payload(item) for item in hits]}
         if name == "read_repository_section":
+            if research_state["reads"] >= 2:
+                return {"error": "Read phase is complete. Assess the collected evidence and return the final answer."}
+            research_state["reads"] += 1
             item = read_codebase_section(selected_product, str(arguments.get("path") or ""), int(arguments.get("line", 1)))
             if item:
                 remember([item])
                 return {"result": _tool_evidence_payload(item)}
             return {"error": "That repository section was not available."}
         if name == "read_repository_file":
+            if research_state["reads"] >= 2:
+                return {"error": "Read phase is complete. Assess the collected evidence and return the final answer."}
+            research_state["reads"] += 1
             start = int(arguments.get("start_line", 1))
             end = int(arguments.get("end_line", start))
             if end < start or end - start > 249:
@@ -3549,18 +3566,14 @@ def _luna_tool_research_decision(query, turns, product_hint=None, force_reply=Fa
                 return {"result": _tool_evidence_payload(item)}
             return {"error": "That repository range was not available."}
         if name == "search_approved_facts":
+            research_state["discoveries"] += 1
             if not APPROVED_FACTS_ENABLED:
                 return {"results": [], "notice": "Approved facts are currently disabled."}
             facts = retrieve_facts(tool_query, product=selected_product, intent=str(arguments.get("intent") or intent), limit=12)
             remember(facts)
             return {"results": [_tool_evidence_payload(item) for item in facts]}
         if name == "search_staff_examples":
-            examples = retrieve_history(tool_query, product=selected_product, limit=6)
-            staff_examples.extend(examples)
-            return {"examples": [
-                {"product": item.get("product"), "question_context": item.get("question_context"), "content": item.get("content")}
-                for item in examples
-            ]}
+            return {"error": "Staff-history search is not part of this answer workflow. Use the current conversation for context."}
         return {"error": "Unknown research tool."}
 
     factual_question = _asks_something(resolved_query) and not _is_social_smalltalk(resolved_query)
@@ -3570,10 +3583,10 @@ def _luna_tool_research_decision(query, turns, product_hint=None, force_reply=Fa
         "Use the conversation only to understand context; the latest question is the task."
     ).format(query, resolved_query, product or "unknown", intent)
     agent_turns = list(context_turns) + [{"role": "user", "content": base_prompt}]
-    # Four calls cover the normal pattern: facts, search, section, and one
-    # related function/file. More calls tend to be repetitive rather than
-    # useful, and the loop always gets a final no-tools synthesis turn.
-    max_rounds = _env_int("LUNA_RESEARCH_MAX_TOOL_ROUNDS", 4)
+    # This is deliberately not environment-configurable: the state machine is
+    # exactly two discovery calls plus two complete reads, followed by one
+    # no-tools synthesis turn in ask_json_with_tools().
+    max_rounds = 4
 
     def final_from_collected_evidence(instruction):
         """Produce an answer from completed research if a tool turn misbehaves."""
@@ -3595,70 +3608,55 @@ def _luna_tool_research_decision(query, turns, product_hint=None, force_reply=Fa
             log.warning("Luna researched finalization unavailable: %s", exc)
             return None
 
-    for research_attempt in range(2):
-        try:
-            draft = ask_json_with_tools(
-                LUNA_TOOL_RESEARCH_SYSTEM,
-                agent_turns,
-                DRAFT_SCHEMA,
-                LUNA_RESEARCH_TOOLS,
-                execute_tool,
-                name="support_luna_tool_research",
-                max_tool_rounds=max_rounds,
-                require_initial_tool=factual_question,
-            )
-        except LLMUnavailable as exc:
-            log.warning("Luna tool research unavailable: %s", exc)
-            draft = final_from_collected_evidence(
-                "The research loop ended unexpectedly after collecting evidence. Answer the user's latest question directly from it."
-            )
-            if draft is None:
-                return _decision("escalate", product or "unknown", intent, ESCALATE, confidence=0.0)
-
-        action = str(draft.get("action") or "")
-        if force_reply and action == "ignore":
-            draft.update({"action": "clarify", "draft_answer": "What would you like help with?", "evidence_ids": [], "claim_evidence": []})
-            action = "clarify"
-        evidence = list(collected.values())
-        valid_ids = {str(item.get("id") or "") for item in evidence}
-        failures, used_ids = _deterministic_research_failures(
-            query, draft, valid_ids, factual_question,
+    try:
+        draft = ask_json_with_tools(
+            LUNA_TOOL_RESEARCH_SYSTEM,
+            agent_turns,
+            DRAFT_SCHEMA,
+            LUNA_RESEARCH_TOOLS,
+            execute_tool,
+            name="support_luna_tool_research",
+            max_tool_rounds=max_rounds,
+            require_initial_tool=factual_question,
         )
-        answer = str(draft.get("draft_answer") or "").strip()
-        if not failures:
-            if action == "ignore":
-                return _decision("ignore", product or "generic", intent, IGNORE, confidence=0.8)
-            if action == "escalate":
-                return _decision("escalate", product or "unknown", intent, ESCALATE, evidence_ids=used_ids)
-            return _decision(action, product or "unknown", intent, answer, evidence_ids=used_ids,
-                             missing_information=draft.get("missing_information", []))
+    except LLMUnavailable as exc:
+        log.warning("Luna tool research unavailable: %s", exc)
+        draft = final_from_collected_evidence(
+            "The research loop ended unexpectedly after collecting evidence. Answer the user's latest question directly from it."
+        )
+        if draft is None:
+            return _decision("escalate", product or "unknown", intent, ESCALATE, confidence=0.0)
 
-        log.info("Luna tool-loop mechanical gate requires correction: %s", failures)
-        # If research already exists, first ask Luna to complete its answer
-        # from that evidence. This prevents a generic escalation from causing
-        # redundant searches and preserves the one-agent research workflow.
+    action = str(draft.get("action") or "")
+    if force_reply and action == "ignore":
+        draft.update({"action": "clarify", "draft_answer": "What would you like help with?", "evidence_ids": [], "claim_evidence": []})
+        action = "clarify"
+    evidence = list(collected.values())
+    valid_ids = {str(item.get("id") or "") for item in evidence}
+    failures, used_ids = _deterministic_research_failures(query, draft, valid_ids, factual_question)
+    answer = str(draft.get("draft_answer") or "").strip()
+    if failures and evidence:
+        # Completion is a synthesis retry, never a fresh open-ended research
+        # pass. A normal product question must not become a handoff merely
+        # because the model exhausted its already-completed tool budget.
+        log.info("Luna tool-loop finalization requires correction: %s", failures)
         finalized = final_from_collected_evidence("Fix this issue: {}.".format("; ".join(failures)))
         if finalized is not None:
             draft = finalized
             action = str(draft.get("action") or "")
-            failures, used_ids = _deterministic_research_failures(
-                query, draft, valid_ids, factual_question,
-            )
+            failures, used_ids = _deterministic_research_failures(query, draft, valid_ids, factual_question)
             answer = str(draft.get("draft_answer") or "").strip()
-            if not failures:
-                return _decision(action, product or "unknown", intent, answer, evidence_ids=used_ids,
-                                 missing_information=draft.get("missing_information", []))
-        if research_attempt == 0:
-            agent_turns.append({"role": "user", "content": (
-                "VALIDATION FEEDBACK: {}\nResearch again with the tools, especially complete "
-                "repository sections needed to answer the question. Then return a new moderator "
-                "answer. Do not describe the research to the user."
-            ).format("; ".join(dict.fromkeys(failures)))})
-            continue
-        return _decision("escalate", product or "unknown", intent, ESCALATE,
-                         evidence_ids=used_ids & valid_ids, unsupported_claims=failures, confidence=0.0)
 
-    return _decision("escalate", product or "unknown", intent, ESCALATE, confidence=0.0)
+    if not failures:
+        if action == "ignore":
+            return _decision("ignore", product or "generic", intent, IGNORE, confidence=0.8)
+        if action == "escalate":
+            return _decision("escalate", product or "unknown", intent, ESCALATE, evidence_ids=used_ids)
+        return _decision(action, product or "unknown", intent, answer, evidence_ids=used_ids,
+                         missing_information=draft.get("missing_information", []))
+
+    return _decision("escalate", product or "unknown", intent, ESCALATE,
+                     evidence_ids=used_ids & valid_ids, unsupported_claims=failures, confidence=0.0)
 
 
 def autonomous_decision(query, turns, product_hint=None, force_reply=False):
