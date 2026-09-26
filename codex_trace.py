@@ -24,7 +24,7 @@ _MAX_VALUE_CHARS = 120
 _ALLOWED_FIELDS = {
     "archive_bytes", "compressed_bytes", "error_code", "event_type",
     "evidence_count", "inline_files", "reason", "result_type",
-    "runtime", "selected_files", "source_bytes", "status",
+    "runtime", "sandbox_calls", "selected_files", "source_bytes", "status",
 }
 
 _EVENT_HEADLINES = {
@@ -96,6 +96,7 @@ def _human_content(event: str, fields: dict) -> str:
         lines.append("Upload split into {} secure part(s).".format(_count(fields.get("inline_files"))))
     elif normalized == "evidence_validated":
         lines.append("{} supporting source(s) passed the evidence check.".format(_count(fields.get("evidence_count"))))
+        lines.append("Sandbox tool calls used: {}.".format(_count(fields.get("sandbox_calls"))))
     elif normalized == "returning_to_shadowmode":
         lines.append("Result type: {}. Sources checked: {}.".format(
             "answer" if fields.get("result_type") == "answer" else "follow-up needed",

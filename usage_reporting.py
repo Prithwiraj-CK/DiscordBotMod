@@ -111,7 +111,7 @@ def support_turn_scope(turn_id):
         _TURN_ID.reset(token)
 
 
-def record_usage(model, usage, now=None, runtime="responses"):
+def record_usage(model, usage, now=None, runtime="responses", sandbox_calls=0):
     """Append a sanitized usage event after a successful OpenAI response."""
     timestamp = float(time.time() if now is None else now)
     counts = usage_counts(usage)
@@ -126,6 +126,13 @@ def record_usage(model, usage, now=None, runtime="responses"):
         **counts,
         "estimated_cost_usd": _cost_usd(str(model), counts),
     }
+    # How many sandboxed tool/command executions the hosted Agents session
+    # ran (0 for the Responses runtime, which has no sandbox). Token usage
+    # is best-effort and often absent for this runtime, so this is the one
+    # reliable, measurable signal of how much investigation actually happened.
+    sandbox_calls = _number(sandbox_calls)
+    if sandbox_calls:
+        event["sandbox_calls"] = sandbox_calls
     turn_id = _TURN_ID.get()
     if turn_id:
         # Discord message IDs are opaque identifiers, not message content.
@@ -137,6 +144,46 @@ def record_usage(model, usage, now=None, runtime="responses"):
             handle.write(json.dumps(event, separators=(",", ":")) + "\n")
     except OSError:
         log.exception("Could not write local OpenAI usage ledger")
+
+
+def record_decision(action, intent, reason=""):
+    """Record what a support turn decided, even when it made zero model calls.
+
+    Some decisions (a social reply, an account/security handoff, an
+    unsupported product, a message that was not actually a question) are
+    correctly $0 spent. Without this, that turn's report is indistinguishable
+    from one where something silently failed before ever calling a model.
+    """
+    turn_id = _TURN_ID.get()
+    if not turn_id:
+        return
+    event = {
+        "timestamp": time.time(),
+        "kind": "decision",
+        "action": str(action or "")[:40],
+        "intent": str(intent or "")[:40],
+        "reason": str(reason or "")[:80],
+        "turn_id": str(turn_id),
+    }
+    path = _runtime_path("USAGE_LEDGER_PATH")
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with _LOCK, path.open("a", encoding="utf-8") as handle:
+            handle.write(json.dumps(event, separators=(",", ":")) + "\n")
+    except OSError:
+        log.exception("Could not write local decision ledger entry")
+
+
+def latest_decision(turn_id):
+    """Return the most recently recorded decision event for one turn, or None."""
+    normalized = str(turn_id or "").strip()
+    if not normalized:
+        return None
+    decisions = [
+        event for event in _load_events(turn_id=normalized)
+        if event.get("kind") == "decision"
+    ]
+    return decisions[-1] if decisions else None
 
 
 def _load_events(since=None, until=None, turn_id=None):
@@ -199,9 +246,14 @@ def summarize_usage(since=None, until=None, turn_id=None):
         "unknown_usage_calls": 0,
         "agent_sessions": 0,
         "responses_calls": 0,
+        "sandbox_calls": 0,
         "models": {},
     }
     for event in _load_events(since, until, turn_id=turn_id):
+        if event.get("kind") == "decision":
+            # A decision record documents a $0 turn; it carries no model,
+            # token, or cost fields and must never be counted as a call.
+            continue
         totals["calls"] += 1
         runtime = str(event.get("runtime") or "responses").lower()
         if runtime == "agents":
@@ -210,6 +262,7 @@ def summarize_usage(since=None, until=None, turn_id=None):
             totals["responses_calls"] += 1
         if event.get("usage_known") is False:
             totals["unknown_usage_calls"] += 1
+        totals["sandbox_calls"] += _number(event.get("sandbox_calls"))
         model = str(event.get("model") or "unknown")
         totals["models"][model] = totals["models"].get(model, 0) + 1
         for field in (
@@ -239,29 +292,52 @@ def _format_totals(totals, label):
     usage_note = ""
     if totals["unknown_usage_calls"]:
         usage_note = "\nToken usage pending for {} completed call(s)".format(totals["unknown_usage_calls"])
+    sandbox_line = ""
+    if totals["agent_sessions"] or totals["sandbox_calls"]:
+        # Hosted Agents usage is best-effort and often absent entirely, so
+        # sandbox tool-call count is the one number that reliably shows how
+        # much investigation actually happened on that runtime.
+        sandbox_line = "\nSandbox tool calls: {:,}".format(totals["sandbox_calls"])
     return (
         "{} estimated cost: **{}**\n"
         "Calls: {} · Models: {}\n"
         "Agents sessions: {} · Responses calls: {}\n"
         "Read: {:,} input tokens ({:,} cached; {:,} cache-write)\n"
-        "Wrote: {:,} output tokens ({:,} reasoning){}"
+        "Wrote: {:,} output tokens ({:,} reasoning){}{}"
     ).format(
         label, cost, totals["calls"], model_text,
         totals["agent_sessions"], totals["responses_calls"],
         totals["input_tokens"], totals["cached_input_tokens"], totals["cache_write_tokens"],
-        totals["output_tokens"], totals["reasoning_tokens"], usage_note,
+        totals["output_tokens"], totals["reasoning_tokens"], usage_note, sandbox_line,
     )
 
 
-def _format_turn_report(turn_totals, cumulative_totals):
+def _format_decision_line(decision):
+    """One line explaining a turn's outcome, most useful when it made $0 in calls."""
+    if not decision:
+        return ""
+    action = decision.get("action") or "unknown"
+    intent = decision.get("intent") or "unknown"
+    reason = decision.get("reason") or ""
+    detail = " ({})".format(reason) if reason and reason != "complete" else ""
+    return "\nDecision: {} / {}{}".format(action, intent, detail)
+
+
+def _format_turn_report(turn_totals, cumulative_totals, decision=None):
     """Show one completed support turn plus the lifetime local ledger total."""
+    decision_line = _format_decision_line(decision)
+    if not decision_line and turn_totals["calls"] == 0:
+        # No calls were made and no decision was recorded for this turn
+        # (an older build, or the process restarted mid-turn) -- say so
+        # plainly rather than leaving an unexplained $0.000000.
+        decision_line = "\nDecision: not recorded for this turn"
     return (
         "**Salena OpenAI usage — completed support response**\n"
-        "{}\n\n"
+        "{}{}\n\n"
         "**Bot total since local tracking began**\n"
         "{}"
     ).format(
-        _format_totals(turn_totals, "This response"),
+        _format_totals(turn_totals, "This response"), decision_line,
         _format_totals(cumulative_totals, "Total"),
     )
 
@@ -338,6 +414,7 @@ def send_turn_snapshot(turn_id):
     return _post_content(_format_turn_report(
         summarize_usage(turn_id=normalized),
         summarize_usage(),
+        decision=latest_decision(normalized),
     ))
 
 

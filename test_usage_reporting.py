@@ -101,6 +101,42 @@ class UsageReportingTests(unittest.TestCase):
         self.assertEqual(1, totals["unknown_cost_calls"])
         self.assertIn("Agents sessions: 1 · Responses calls: 0", usage_reporting._format_totals(totals, "This response"))
 
+    def test_sandbox_calls_are_recorded_and_summed(self):
+        with usage_reporting.support_turn_scope("agent-turn-sandbox"):
+            usage_reporting.record_usage(
+                "gpt-6-luna", _Usage(), now=106, runtime="agents", sandbox_calls=4,
+            )
+        totals = usage_reporting.summarize_usage(turn_id="agent-turn-sandbox")
+        self.assertEqual(4, totals["sandbox_calls"])
+        self.assertIn("Sandbox tool calls: 4", usage_reporting._format_totals(totals, "This response"))
+
+    def test_a_zero_call_turn_records_and_reports_its_decision(self):
+        # This is the exact scenario a developer saw and asked about: a
+        # completed turn that made no model calls at all (a message that
+        # short-circuited to "clarify" before ever reaching investigate_olympus
+        # or the Responses research loop). $0.000000 / Calls: 0 is correct,
+        # but the report must say *why* rather than looking broken.
+        with usage_reporting.support_turn_scope("zero-call-turn"):
+            usage_reporting.record_decision("clarify", "unknown", reason="complete")
+        totals = usage_reporting.summarize_usage(turn_id="zero-call-turn")
+        self.assertEqual(0, totals["calls"])
+        decision = usage_reporting.latest_decision("zero-call-turn")
+        self.assertEqual("clarify", decision["action"])
+        report = usage_reporting._format_turn_report(totals, usage_reporting.summarize_usage(), decision)
+        self.assertIn("Decision: clarify / unknown", report)
+        # A decision record must never be miscounted as a billable call.
+        self.assertIn("Calls: 0", report)
+
+    def test_a_zero_call_turn_without_a_recorded_decision_says_so_plainly(self):
+        totals = usage_reporting.summarize_usage(turn_id="never-recorded-turn")
+        report = usage_reporting._format_turn_report(totals, usage_reporting.summarize_usage(), None)
+        self.assertIn("Decision: not recorded for this turn", report)
+
+    def test_record_decision_without_an_active_turn_scope_is_a_no_op(self):
+        # There is nothing to attribute a decision to outside a support turn.
+        usage_reporting.record_decision("answer", "settings", reason="complete")
+        self.assertFalse(self.ledger.exists())
+
 
 if __name__ == "__main__":
     unittest.main()

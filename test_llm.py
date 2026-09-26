@@ -8,6 +8,19 @@ import openai
 
 
 class LlmTests(unittest.TestCase):
+    def setUp(self):
+        # llm.ask_json/ask_json_with_tools call llm.record_usage internally
+        # on every real response, mocked SDK client or not. Unmocked, this
+        # suite silently wrote a `usage_known:false, 0 tokens` entry to the
+        # developer's real .runtime/openai_usage.jsonl on every test run,
+        # inflating the real "Bot total since local tracking began" report
+        # with test-run noise instead of real Discord activity.
+        self._record_usage = patch("llm.record_usage")
+        self._record_usage.start()
+
+    def tearDown(self):
+        self._record_usage.stop()
+
     def test_ask_json_retries_incomplete_response_and_uses_configured_budget(self):
         responses = Mock()
         responses.create.side_effect = [

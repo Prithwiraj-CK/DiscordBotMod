@@ -76,8 +76,8 @@ from support_pipeline import (
     resolve_live_product,
 )
 from usage_reporting import (
-    record_usage, request_usage_report_update, start_daily_usage_reporter, summarize_usage,
-    support_turn_scope,
+    record_decision, record_usage, request_usage_report_update, start_daily_usage_reporter,
+    summarize_usage, support_turn_scope,
 )
 
 logging.basicConfig(
@@ -3988,22 +3988,34 @@ def _codex_agents_decision(query, turns, product_hint=None, force_reply=False):
                 recent_sessions, AGENTS_MAX_SESSIONS_PER_HOUR,
             )
             raise CodexInvestigationUnavailable("agents_session_rate_limited")
-    estimated_input = estimate_tokens({"question": resolved_query, "turns": context_turns})
+    product = live_scope["product"]
+    intent = _intent_hint(resolved_query) or "unknown"
+    # The hosted sandbox previously received only repository files. Preserve
+    # the existing FAQ/fact authority by sending a small, query-selected set
+    # alongside the question; this is bounded and never includes the entire
+    # local corpus or Discord history.
+    approved_facts = (
+        retrieve_facts(resolved_query, product=product, intent=intent, limit=6)
+        if APPROVED_FACTS_ENABLED else []
+    )
+    estimated_input = estimate_tokens({
+        "question": resolved_query, "turns": context_turns,
+        "approved_fact_ids": [fact.get("id") for fact in approved_facts],
+    })
     budget.before_model_call(estimated_input)
-    result = investigate_olympus(resolved_query, context_turns)
+    result = investigate_olympus(resolved_query, context_turns, approved_facts=approved_facts)
     # Hosted Agents does not pass through llm.py, so explicitly add this
     # completed session to the same per-Discord-turn accounting ledger.
     try:
         record_usage(
             os.getenv("AGENTS_MODEL", "gpt-6-luna").strip() or "gpt-6-luna",
             result.get("usage"), runtime="agents",
+            sandbox_calls=result.get("sandbox_calls", 0),
         )
     except Exception:
         log.exception("Could not record hosted Agents usage")
     budget.record_response(result.get("usage"), estimated_input)
 
-    product = live_scope["product"]
-    intent = _intent_hint(resolved_query) or "unknown"
     status = result["status"]
     # The hosted agent can legitimately cite the same file/line range twice
     # (once per claim). Deduplicate by evidence id before budgeting so two
@@ -4053,6 +4065,7 @@ def autonomous_decision(query, turns, product_hint=None, force_reply=False):
     # tool loop above. The older one-shot collector remains below temporarily
     # for audit history, but is intentionally unreachable in live support.
     budget = ResearchBudget.from_environment()
+    decision = None
     with research_budget_scope(budget):
         try:
             if AGENT_RUNTIME == "agents":
@@ -4114,6 +4127,18 @@ def autonomous_decision(query, turns, product_hint=None, force_reply=False):
                 summary["reasoning_tokens"], summary["tool_output_tokens"],
                 summary["tool_calls"], summary["read_calls"], summary["evidence_ids"],
             )
+            # Record what this turn decided even when it made zero model
+            # calls (a social reply, an account handoff, an unsupported
+            # product, a message that was not actually a question). Without
+            # this, a legitimate $0 turn is indistinguishable in the Discord
+            # usage report from one where something silently broke.
+            # `decision` stays None (skipping this) if an exception other
+            # than the two handled above escaped the try block.
+            if decision is not None:
+                try:
+                    record_decision(decision["action"], decision["intent"], reason=summary["stop_reason"])
+                except Exception:
+                    log.exception("Could not record turn decision")
     return decision
 
     context_turns = _luna_conversation_window(turns)

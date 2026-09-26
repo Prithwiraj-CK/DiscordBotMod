@@ -168,10 +168,35 @@ class HostedCodexPilotTests(unittest.TestCase):
             b"event: agent.session.turn.completed",
             b'data: {"type":"agent.session.turn.completed"}',
         ]
-        text, _usage, completed, session_id = _extract_sse(_Response(lines=events))
+        text, _usage, completed, session_id, _sandbox_calls = _extract_sse(_Response(lines=events))
         self.assertTrue(completed)
         self.assertEqual("sess_utf8", session_id)
         self.assertIn("Yes—Polymarket’s", text)
+
+    def test_sandbox_calls_are_counted_once_per_completed_tool_invocation(self):
+        final = json.dumps({
+            "status": "confirmed", "answer": "a",
+            "evidence": [{"path": "p.ts", "line_start": 1, "line_end": 2}],
+            "missing_information": [],
+        })
+        events = [
+            b'data: {"type":"agent.session.created","session_id":"sess_sbx"}',
+            # Three sandboxed commands, each an added/done pair -- only the
+            # "done" side should be counted, once each.
+            b'data: {"type":"agent.session.turn.item.added","item":{"type":"command_execution"}}',
+            b'data: {"type":"agent.session.turn.item.done","item":{"type":"command_execution"}}',
+            b'data: {"type":"agent.session.turn.item.added","item":{"type":"command_execution"}}',
+            b'data: {"type":"agent.session.turn.item.done","item":{"type":"command_execution"}}',
+            b'data: {"type":"agent.session.turn.item.added","item":{"type":"command_execution"}}',
+            b'data: {"type":"agent.session.turn.item.done","item":{"type":"command_execution"}}',
+            ("data: " + json.dumps({
+                "type": "agent.session.turn.output_text.done", "text": final,
+            })).encode(),
+            b'data: {"type":"agent.session.turn.completed"}',
+        ]
+        _text, _usage, completed, _sid, sandbox_calls = _extract_sse(_Response(lines=events))
+        self.assertTrue(completed)
+        self.assertEqual(3, sandbox_calls)
 
     def test_agents_runtime_returns_to_existing_responses_pipeline_on_failure(self):
         fallback = bot._decision("answer", "olympus", "settings", "Responses fallback answer.")
@@ -205,7 +230,9 @@ class HostedCodexPilotTests(unittest.TestCase):
                 "does the graph include unrealized profit and loss?", [], force_reply=True,
             )
         investigate.assert_called_once()
-        recorded.assert_called_once_with("gpt-6-luna", investigation["usage"], runtime="agents")
+        recorded.assert_called_once_with(
+            "gpt-6-luna", investigation["usage"], runtime="agents", sandbox_calls=0,
+        )
         self.assertEqual("answer", result["action"])
         self.assertEqual("It includes unrealized P&L.", result["draft_answer"])
 
@@ -263,7 +290,10 @@ class HostedCodexPilotTests(unittest.TestCase):
              patch("bot.investigate_olympus", return_value=investigation), \
              patch("bot._guard_output", return_value="shadow"), \
              patch("bot._call", side_effect=invoke), \
+             patch("bot.record_usage"), \
              patch("bot._discord_post_message", side_effect=lambda _target, body, **_kwargs: posted.append(body)):
+            # record_usage is mocked so this test never writes to the
+            # developer's real .runtime/openai_usage.jsonl.
             bot._answer(message)
         self.assertEqual(1, len(posted))
         self.assertIn("**shadow proposal**", posted[0])
