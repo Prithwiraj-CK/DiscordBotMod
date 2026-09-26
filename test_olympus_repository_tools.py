@@ -1,6 +1,7 @@
 """Fixture-only safety and discovery tests for Olympus repository tools."""
 
 import os
+import re
 import subprocess
 import tempfile
 import unittest
@@ -122,6 +123,20 @@ Max Trade Size limits a copied order.
         self.assertEqual("budget_exhausted", result["status"])
         self.assertEqual("budget_exhausted", result["error"])
         self.assertTrue(session.trace_events)
+        self.assertNotIn("Max Trade Size", str(session.trace_events))
+
+    def test_unexpected_repository_failure_is_traceable_but_safe_for_the_model(self):
+        root = self._with_repository()
+        session = self._session(root)
+        with patch("olympus_repository_tools.search_codebase", side_effect=IndexError("internal detail")), \
+             patch("olympus_repository_tools.log.exception") as log_exception:
+            result = session.execute("search_repository", {"query": "Max Trade Size"})
+        self.assertEqual("error", result["status"])
+        self.assertEqual("tool_internal_error", result["error"])
+        self.assertRegex(result["failure_id"], r"^repo_tool_[0-9a-f]{12}$")
+        self.assertNotIn("internal detail", str(result))
+        self.assertNotIn(str(root), str(result))
+        log_exception.assert_called_once()
         self.assertNotIn("Max Trade Size", str(session.trace_events))
 
     def test_arbitrary_test_commands_are_rejected_and_allowlisted_tests_fail_closed(self):

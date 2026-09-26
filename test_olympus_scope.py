@@ -3,6 +3,7 @@
 import unittest
 from unittest.mock import patch
 
+import bot
 from bot import (
     ESCALATE,
     LUNA_RESEARCH_TOOLS,
@@ -39,6 +40,17 @@ OLYMPUS_SECTION = {
 
 
 class OlympusScopeTests(unittest.TestCase):
+    def setUp(self):
+        # This suite exercises the Responses/Luna research loop only. A
+        # developer's real .env may set AGENT_RUNTIME=agents for a live
+        # pilot; that must never make an offline unit test take the hosted
+        # Codex path, make a real network call, or spend real API budget.
+        self._agent_runtime = patch.object(bot, "AGENT_RUNTIME", "responses")
+        self._agent_runtime.start()
+
+    def tearDown(self):
+        self._agent_runtime.stop()
+
     @staticmethod
     def _plan():
         return {

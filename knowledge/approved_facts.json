@@ -318,6 +318,19 @@
       "approved": true
     },
     {
+      "id": "olympus.copy_trade.max_trade_size",
+      "product": "olympus",
+      "topic": "copy_trading",
+      "action": "answer",
+      "fact": "Max Trade Size (USD) is the maximum amount Olympus will use for one copied trade. When the amount calculated from the follower's ratio is higher than this setting, Olympus caps that individual copied trade at the Max Trade Size.",
+      "answer_guidance": "Distinguish this from Max Market Size, which caps the total capital deployed into one market for that wallet. Do not diagnose a user's specific order size; escalate a missing, incorrectly sized, or unexpected copied trade.",
+      "retrieval_terms": ["max trade size", "max trade", "single copied trade", "trade cap", "copy size", "ratio cap"],
+      "source": {"kind": "official_product_docs", "ref": "https://www.olympusx.app/docs/04-how-copy-trading-works"},
+      "last_verified": "2026-09-26",
+      "risk": "high",
+      "approved": true
+    },
+    {
       "id": "olympus.copy_trade.backtesting",
       "product": "olympus",
       "topic": "copy_trading",

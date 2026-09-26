@@ -288,6 +288,24 @@ def _workflow_queries(query: str) -> list[str]:
             "targetTransaction",
             "copyTradeQueue.add",
         ])
+
+    # Support users often call a PnL curve a "wallet value graph" or a
+    # "value-over-time chart".  The implementation, however, commonly calls
+    # it PnL history, a cumulative series, or a chart component.  Search those
+    # bounded implementation concepts first so a broad word such as "wallet"
+    # cannot drown out the actual UI-to-data path.
+    about_chart = bool(re.search(r"\b(?:chart|graph|curve|history|timeline)\b", lowered))
+    about_performance = bool(re.search(
+        r"\b(?:pnl|p&l|profit|loss|value|performance|unrealized|unrealised|realized|realised)\b",
+        lowered,
+    )) or "over time" in lowered
+    if about_chart and about_performance:
+        queries.extend([
+            "PnL history",
+            "cumulative PnL",
+            "user-pnl",
+            "PnlChart",
+        ])
     return list(dict.fromkeys(queries))
 
 
@@ -320,10 +338,18 @@ def _is_safe_text_file(path: Path) -> bool:
 
 def _safe_text_files(root: Path) -> list[Path]:
     files = []
+    walk_errors = []
+
+    def _record_walk_error(exc: OSError) -> None:
+        # Do not log paths here: configured repository locations can be
+        # private.  The error class is sufficient to distinguish an empty
+        # product checkout from a sandbox/TCC permission failure.
+        walk_errors.append(type(exc).__name__)
+
     # os.walk lets us prune dependency/generated trees before descending into
     # them; Path.rglob would enumerate those trees first.
     try:
-        walker = os.walk(root, topdown=True, followlinks=False)
+        walker = os.walk(root, topdown=True, followlinks=False, onerror=_record_walk_error)
         for directory, directories, filenames in walker:
             directories[:] = [
                 name for name in directories
@@ -336,6 +362,11 @@ def _safe_text_files(root: Path) -> list[Path]:
                     files.append(path)
     except OSError:
         return files
+    if walk_errors:
+        log.warning(
+            "Repository scan encountered unreadable directories: error_types=%s",
+            ",".join(sorted(set(walk_errors))),
+        )
     return sorted(files, key=lambda value: value.relative_to(root).as_posix().lower())
 
 
@@ -420,6 +451,7 @@ def _structural_index(root: Path) -> list[dict]:
 def _semantic_terms(query: str) -> set[str]:
     """Expand common user language into product implementation vocabulary."""
     lowered = (query or "").casefold()
+    terms = set(token.casefold() for token in _TOKEN_RE.findall(lowered))
     expansions = {
         "start": "setup onboard getting-started initialize login connect",
         "setup": "start onboard getting-started configure initialize",
@@ -434,8 +466,17 @@ def _semantic_terms(query: str) -> set[str]:
         "missing": "not-found absent unavailable discrepancy stuck",
         "website": "web app frontend browser route page",
         "discord": "command slash interaction channel bot",
+        # UI wording for performance charts rarely matches the implementation
+        # vocabulary exactly.  These are retrieval aliases only, never facts
+        # about what a particular chart includes or how it is calculated.
+        "chart": "graph curve pnl history cumulative series",
+        "graph": "chart curve pnl history cumulative series",
+        "curve": "chart graph pnl history cumulative series",
+        "unrealized": "mark-to-market open positions pnl history",
+        "unrealised": "mark-to-market open positions pnl history",
     }
-    terms = set(token.casefold() for token in _TOKEN_RE.findall(lowered))
+    if "over time" in lowered or "value over" in lowered:
+        terms.update("pnl history cumulative series chart graph".split())
     for trigger, values in expansions.items():
         if trigger in lowered:
             terms.update(values.split())
@@ -476,6 +517,16 @@ def _anchor_score_fields(item: dict, query: str, product: str,
             ui_label = max(ui_label, 130)
         if _normalised_phrase(label) in normalized_path:
             filename = max(filename, 110)
+    # A workflow alias is deliberately weaker than an exact UI label, but it
+    # should beat incidental mentions in old plans/audits.  It is a routing
+    # hint only; the later read and evidence gates still decide whether the
+    # source can support an answer.
+    workflow_alias = 0
+    for alias in _workflow_queries(query):
+        if _contains_phrase(haystack, alias):
+            workflow_alias = max(workflow_alias, 70)
+        if _normalised_phrase(alias) in normalized_path:
+            workflow_alias = max(workflow_alias, 85)
     heading = 55 if kind == "heading" or _HEADING_RE.match(text) else 0
     symbol = 50 if kind == "symbol" or _SYMBOL_RE.match(text) else 0
     route = 45 if kind == "route" or _ROUTE_RE.search(text) else 0
@@ -493,6 +544,7 @@ def _anchor_score_fields(item: dict, query: str, product: str,
         "exact_phrase": exact_phrase,
         "ui_label": ui_label,
         "filename": filename,
+        "workflow_alias": workflow_alias,
         "heading": heading,
         "symbol": symbol,
         "route": route,
@@ -504,13 +556,18 @@ def _anchor_score_fields(item: dict, query: str, product: str,
     }
 
 
-def _anchor_section_key(root: Path, item: dict) -> tuple[str, int, int]:
+def _anchor_section_key(root: Path, item: dict) -> tuple[str, int, int] | None:
     """Deduplicate anchors pointing into the same readable surrounding section."""
     relative = str(item.get("path") or "")
     try:
         path = (root / relative).resolve(strict=True)
         path.relative_to(root)
         lines = _read_text(path).splitlines()
+        # Structural filename matches can point at an empty placeholder file.
+        # They have no readable evidence section, so they must never become a
+        # tool anchor that later fails in the section reader.
+        if not lines:
+            return None
         start, end = _section_bounds(lines, int(item.get("line") or 1), path.suffix)
     except (OSError, RuntimeError, ValueError, TypeError):
         line = max(1, int(item.get("line") or 1))
@@ -546,6 +603,8 @@ def _rank_and_diversify_anchors(query: str, product: str, root: Path,
     for item in ranked:
         path = str(item["path"])
         section = _anchor_section_key(root, item)
+        if section is None:
+            continue
         if section in sections or paths.get(path, 0) >= 2:
             continue
         sections.add(section)
@@ -972,6 +1031,8 @@ def read_codebase_file(
 
 def _section_bounds(lines: list[str], anchor: int, suffix: str) -> tuple[int, int]:
     """Find the enclosing Markdown section or code declaration."""
+    if not lines:
+        return 1, 0
     anchor = max(1, min(len(lines), int(anchor)))
     markdown = suffix.lower() in {".md", ".mdx", ".txt"}
     if markdown:

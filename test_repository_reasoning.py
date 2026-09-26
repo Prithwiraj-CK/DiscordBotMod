@@ -3,6 +3,7 @@
 import unittest
 from unittest.mock import patch
 
+import bot
 from bot import (
     _deterministic_research_failures,
     _historical_product_hint, _known_safe_answer, _luna_conversation_window,
@@ -23,6 +24,17 @@ QUESTION = (
 
 
 class RepositoryReasoningTests(unittest.TestCase):
+    def setUp(self):
+        # This suite exercises the Responses/Luna research loop only. A
+        # developer's real .env may set AGENT_RUNTIME=agents for a live
+        # pilot; that must never make an offline unit test take the hosted
+        # Codex path, make a real network call, or spend real API budget.
+        self._agent_runtime = patch.object(bot, "AGENT_RUNTIME", "responses")
+        self._agent_runtime.start()
+
+    def tearDown(self):
+        self._agent_runtime.stop()
+
     def test_incomplete_general_product_question_may_handoff_after_research(self):
         draft = {
             "action": "escalate", "evidence_ids": ["repo.wallet.section"],
@@ -184,6 +196,15 @@ class RepositoryReasoningTests(unittest.TestCase):
         answer = _known_safe_answer(question, "olympus", facts)
         self.assertIn("resolved market", answer)
         self.assertIn("USDC", answer)
+
+    def test_max_trade_size_retrieves_the_approved_olympus_definition(self):
+        facts = retrieve_facts(
+            "What does Max Trade Size limit in Olympus?",
+            product="olympus",
+            intent="unknown",
+            limit=10,
+        )
+        self.assertIn("olympus.copy_trade.max_trade_size", {item["id"] for item in facts})
 
     def test_wallet_address_roles_include_the_default_deposit_mapping(self):
         question = "Why does a new Olympus wallet have signing, trading, and deposit addresses?"

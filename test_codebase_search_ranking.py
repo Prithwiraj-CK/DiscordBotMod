@@ -24,6 +24,9 @@ class CodebaseSearchRankingTests(unittest.TestCase):
   return value;
 }
 """,
+            # Filename-only discovery must not turn an empty placeholder into
+            # an unreadable repository-tool anchor.
+            "src/max-trade-size-placeholder.ts": "",
             "src/max-market-size.ts": """export function maxMarketSize(value: number) {
   return value;
 }
@@ -45,6 +48,23 @@ This review discusses trade size in general terms only.
   const size = value;
   return size;
 }
+""",
+            "src/polymarket-user-pnl.ts": """export interface PnlHistoryPoint {
+  t: number;
+  p: number;
+}
+
+export async function fetchPnlHistory(walletAddress: string) {
+  return fetch(`/user-pnl?user_address=${walletAddress}`);
+}
+""",
+            "src/WalletPnlChart.tsx": """export function WalletPnlChart({ data }: { data: PnlHistoryPoint[] }) {
+  return <Chart data={data} />;
+}
+""",
+            "docs/backtesting-audit.md": """# Audit notes
+
+This discusses an unrelated historical equity curve and unrealized PnL.
 """,
         }
         for relative, content in files.items():
@@ -80,6 +100,10 @@ This review discusses trade size in general terms only.
         ]
         self.assertTrue(exact_scores)
 
+    def test_empty_structural_filename_match_is_skipped_without_crashing(self):
+        anchors = self._search()
+        self.assertNotIn("src/max-trade-size-placeholder.ts", [anchor["path"] for anchor in anchors])
+
     def test_filename_or_symbol_exact_match_beats_loose_cooccurrence(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
@@ -95,13 +119,32 @@ This review discusses trade size in general terms only.
     def test_search_anchors_are_non_citable_and_expose_all_score_fields(self):
         anchors = self._search()
         expected = {
-            "exact_phrase", "ui_label", "filename", "heading", "symbol", "route",
+            "exact_phrase", "ui_label", "filename", "workflow_alias", "heading", "symbol", "route",
             "documentation", "executable_code", "test", "generated_or_plan_penalty", "token_overlap",
         }
         self.assertTrue(anchors)
         for anchor in anchors:
             self.assertFalse(anchor["citable"])
             self.assertEqual(expected, set(anchor["score_fields"]))
+
+    def test_value_over_time_wording_finds_the_wallet_pnl_data_path(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            self._fixture_repository(root)
+            with patch.dict(os.environ, {"CODEBASE_OLYMPUS_PATH": str(root)}, clear=False):
+                anchors = search_codebase(
+                    "Does the wallet value-over-time graph include unrealized profit and loss?",
+                    "olympus",
+                    limit=8,
+                )
+        paths = [anchor["path"] for anchor in anchors]
+        self.assertIn("src/polymarket-user-pnl.ts", paths)
+        self.assertIn("src/WalletPnlChart.tsx", paths)
+        self.assertLess(
+            paths.index("src/polymarket-user-pnl.ts"),
+            paths.index("docs/backtesting-audit.md"),
+        )
+        self.assertTrue(all(anchor["citable"] is False for anchor in anchors))
 
 
 if __name__ == "__main__":

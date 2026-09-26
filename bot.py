@@ -57,6 +57,8 @@ from codebase_search import (
 from olympus_repository_tools import (
     OLYMPUS_REPOSITORY_TOOL_SCHEMAS, OlympusRepositoryTools,
 )
+from codex_investigator import CodexInvestigationUnavailable, investigate_olympus
+from codex_trace import emit as emit_codex_trace
 from conversation_memory import ConversationMemory
 from knowledge import (
     history_prompt, load_knowledge, notes_prompt, retrieve_facts,
@@ -74,7 +76,8 @@ from support_pipeline import (
     resolve_live_product,
 )
 from usage_reporting import (
-    request_usage_report_update, start_daily_usage_reporter, support_turn_scope,
+    record_usage, request_usage_report_update, start_daily_usage_reporter, summarize_usage,
+    support_turn_scope,
 )
 
 logging.basicConfig(
@@ -121,6 +124,23 @@ def _transport_mode(raw):
     return "rest"
 
 
+def _agent_runtime(raw):
+    """Keep the established Responses path as the safe default."""
+    value = str(raw or "responses").strip().lower()
+    if value in {"responses", "agents"}:
+        return value
+    if value:
+        log.warning("Unknown AGENT_RUNTIME=%r; using responses", value)
+    return "responses"
+
+
+def _enabled(raw, default=True):
+    value = str(raw or "").strip().lower()
+    if not value:
+        return default
+    return value in {"1", "true", "yes", "on"}
+
+
 def _parse_channel_ids(raw):
     """One malformed id must not take the whole allowlist with it.
 
@@ -148,6 +168,18 @@ STAFF_ROLE_ID = os.getenv("STAFF_ROLE_ID", "").strip()
 # interleaved with them.
 CONTEXT_MESSAGES = max(12, _env_int("CONTEXT_MESSAGES", 12))
 DISCORD_TRANSPORT = _transport_mode(os.getenv("DISCORD_TRANSPORT", "rest"))
+AGENT_RUNTIME = _agent_runtime(os.getenv("AGENT_RUNTIME", "responses"))
+AGENT_FAILURE_FALLBACK_TO_RESPONSES = _enabled(
+    os.getenv("AGENT_FAILURE_FALLBACK_TO_RESPONSES"), default=True,
+)
+# The hosted Agents API does not reliably return per-call token usage, so
+# ResearchBudget's normal input-token ceiling cannot bound spend on this path.
+# A rolling session-count ceiling is a real, measurable substitute. 0 disables it.
+AGENTS_MAX_SESSIONS_PER_HOUR = _env_int("AGENTS_MAX_SESSIONS_PER_HOUR", 40)
+# ops/refresh-olympus-mirror.py writes this marker on every successful build.
+# Nothing refreshes the mirror automatically, so its age is otherwise invisible.
+_OLYMPUS_MIRROR_MARKER = ".olympus-mirror-refreshed-at"
+OLYMPUS_MIRROR_STALE_HOURS = _env_float("OLYMPUS_MIRROR_STALE_HOURS", 24.0)
 REST_POLL_SECONDS = max(10.0, _env_float("REST_POLL_SECONDS", 15))
 
 # Catch-up sweep: how often to look for messages we missed, how far back to
@@ -182,11 +214,12 @@ GATEWAY_RESTART_GRACE_SECONDS = max(
 # reply to every "gm" from half an hour ago.
 SWEEP_BACKFILL = os.getenv("SWEEP_BACKFILL_ON_START", "").strip().lower() in ("1", "true", "yes")
 
-# A short recovery window so a stalled poller or quick restart does not lose a
-# freshly tagged question. The normal answer filter still requires a direct
-# tag/reply, so this never turns a restart into a replay of ordinary chat.
+# REST mode records its startup boundary before authenticating. Keep the normal
+# start path strictly forward-only: an old question must never become a new
+# question merely because the process restarted. Operators who explicitly set
+# SWEEP_BACKFILL_ON_START may still opt into historical recovery.
 _BACKFILL_GRACE = timedelta(
-    seconds=max(60, _env_float("REST_BACKFILL_GRACE_SECONDS", 300))
+    seconds=max(0, _env_float("REST_BACKFILL_GRACE_SECONDS", 0))
 )
 
 # How many times we'll try to answer one message before writing it off.
@@ -3909,6 +3942,104 @@ def _luna_tool_research_decision(query, turns, product_hint=None, force_reply=Fa
                      evidence_ids=used_ids & valid_ids, unsupported_claims=failures, confidence=0.0)
 
 
+def _codex_agents_decision(query, turns, product_hint=None, force_reply=False):
+    """Use an opt-in hosted Codex investigation without taking over Discord.
+
+    The caller still owns all shadow-mode and Discord handling. This function
+    only turns a compact, validated agent result into the same decision object
+    used by the existing Responses research path.
+    """
+    if force_reply and _is_social_smalltalk(query):
+        product = product_hint if is_supported_product(product_hint) else "generic"
+        return _decision("answer", product, "social", _social_reply(query), confidence=1.0)
+    if _requires_account_handoff(query):
+        return _decision("escalate", DEFAULT_SUPPORTED_PRODUCT, "support_triage", ESCALATE, confidence=1.0)
+
+    context_turns = _luna_conversation_window(turns)
+    resolved_query = _resolve_follow_up_question(query, context_turns)
+    live_scope = resolve_live_product(resolved_query, prior_product=product_hint)
+    if not live_scope["supported"]:
+        return _decision(
+            "escalate", live_scope["product"], "unsupported_product",
+            UNSUPPORTED_PRODUCT_HANDOFF, confidence=1.0,
+        )
+    # Match the Responses path's gate exactly (bot.py's
+    # _luna_tool_research_decision) so switching AGENT_RUNTIME changes only
+    # the investigation source, never which messages start a research turn.
+    factual_question = _asks_something(resolved_query) and not _is_social_smalltalk(resolved_query)
+    if not factual_question:
+        return _decision(
+            "clarify", live_scope["product"], "unknown",
+            "What would you like help with?", confidence=0.5,
+        )
+
+    budget = current_research_budget()
+    if budget is None:
+        raise RuntimeError("hosted Codex research requires an active ResearchBudget")
+    if AGENTS_MAX_SESSIONS_PER_HOUR > 0:
+        try:
+            recent_sessions = summarize_usage(since=time.time() - 3600)["agent_sessions"]
+        except Exception:
+            recent_sessions = 0
+            log.exception("Could not read the hosted-agent usage ledger for rate limiting")
+        if recent_sessions >= AGENTS_MAX_SESSIONS_PER_HOUR:
+            log.warning(
+                "[CODEX] hosted session rate limit reached: %s/%s in the last hour",
+                recent_sessions, AGENTS_MAX_SESSIONS_PER_HOUR,
+            )
+            raise CodexInvestigationUnavailable("agents_session_rate_limited")
+    estimated_input = estimate_tokens({"question": resolved_query, "turns": context_turns})
+    budget.before_model_call(estimated_input)
+    result = investigate_olympus(resolved_query, context_turns)
+    # Hosted Agents does not pass through llm.py, so explicitly add this
+    # completed session to the same per-Discord-turn accounting ledger.
+    try:
+        record_usage(
+            os.getenv("AGENTS_MODEL", "gpt-6-luna").strip() or "gpt-6-luna",
+            result.get("usage"), runtime="agents",
+        )
+    except Exception:
+        log.exception("Could not record hosted Agents usage")
+    budget.record_response(result.get("usage"), estimated_input)
+
+    product = live_scope["product"]
+    intent = _intent_hint(resolved_query) or "unknown"
+    status = result["status"]
+    # The hosted agent can legitimately cite the same file/line range twice
+    # (once per claim). Deduplicate by evidence id before budgeting so two
+    # identical citations don't masquerade as the evidence cap being hit and
+    # trigger a needless Responses fallback below.
+    evidence_by_id = OrderedDict()
+    for item in result["evidence"]:
+        evidence_id = "codex.{}.{}:{}-{}".format(product, item["path"], item["line_start"], item["line_end"])
+        evidence_by_id.setdefault(evidence_id, {"id": evidence_id, **item})
+    evidence = list(evidence_by_id.values())
+    selected = budget.select_evidence(evidence)
+    # A confirmed answer must retain every source reference the agent relied
+    # on. Truncating them because an operator lowered the evidence cap would
+    # turn a supported answer into an unverifiable one, so use the established
+    # Responses fallback instead.
+    if status == "confirmed" and len(selected) != len(evidence):
+        raise CodexInvestigationUnavailable("agent_evidence_budget_exhausted")
+    evidence_ids = [item["id"] for item in selected]
+    if status == "confirmed":
+        log.info("[CODEX] returning validated result to shadowmode")
+        emit_codex_trace("returning_to_shadowmode", result_type="answer", evidence_count=len(evidence_ids))
+        return _decision("answer", product, intent, result["answer"], evidence_ids=evidence_ids, confidence=0.8)
+    if status == "needs_information" and result["answer"]:
+        log.info("[CODEX] returning clarification to shadowmode")
+        emit_codex_trace("returning_to_shadowmode", result_type="clarify", evidence_count=len(evidence_ids))
+        return _decision(
+            "clarify", product, intent, result["answer"], evidence_ids=evidence_ids,
+            missing_information=result["missing_information"], confidence=0.5,
+        )
+    return _decision(
+        "escalate", product, intent, ESCALATE, evidence_ids=evidence_ids,
+        missing_information=result["missing_information"] or ["repository evidence incomplete"],
+        confidence=0.0,
+    )
+
+
 def autonomous_decision(query, turns, product_hint=None, force_reply=False):
     """Research the enabled product scope, then let Luna make one final decision.
 
@@ -3924,9 +4055,47 @@ def autonomous_decision(query, turns, product_hint=None, force_reply=False):
     budget = ResearchBudget.from_environment()
     with research_budget_scope(budget):
         try:
-            decision = _luna_tool_research_decision(
-                query, turns, product_hint=product_hint, force_reply=force_reply,
-            )
+            if AGENT_RUNTIME == "agents":
+                try:
+                    decision = _codex_agents_decision(
+                        query, turns, product_hint=product_hint, force_reply=force_reply,
+                    )
+                except CodexInvestigationUnavailable as exc:
+                    if AGENT_FAILURE_FALLBACK_TO_RESPONSES:
+                        # The production default preserves the existing safe
+                        # path. Pilot operators can explicitly disable this
+                        # to prevent a failed hosted attempt from spending a
+                        # second set of Responses tokens.
+                        log.warning("[CODEX] unavailable; using Responses fallback: %s", exc)
+                        emit_codex_trace("responses_fallback", reason=str(exc))
+                        # The Responses fallback is a fully independent
+                        # research attempt. A hosted session that spent most
+                        # of its own wall-clock budget before failing (a
+                        # timeout is the single most likely hosted failure)
+                        # must never leave the fallback with no time left,
+                        # and any evidence ids the hosted attempt already
+                        # selected before failing must never occupy the
+                        # fallback's evidence-item cap. Give it a fresh
+                        # budget rather than reusing the exhausted one.
+                        budget = ResearchBudget.from_environment()
+                        with research_budget_scope(budget):
+                            decision = _luna_tool_research_decision(
+                                query, turns, product_hint=product_hint, force_reply=force_reply,
+                            )
+                    else:
+                        budget.note_stop("failure")
+                        log.warning("[CODEX] unavailable; abstaining without Responses fallback: %s", exc)
+                        emit_codex_trace("research_abstained", reason=str(exc))
+                        decision = _decision(
+                            "escalate", DEFAULT_SUPPORTED_PRODUCT, "agent_failure", ESCALATE,
+                            missing_information=["hosted research unavailable / evidence incomplete"],
+                            unsupported_claims=["hosted research stopped: {}".format(exc)],
+                            confidence=0.0,
+                        )
+            else:
+                decision = _luna_tool_research_decision(
+                    query, turns, product_hint=product_hint, force_reply=force_reply,
+                )
         except ResearchBudgetExceeded as exc:
             budget.note_stop(exc.reason)
             decision = _decision(
@@ -4873,6 +5042,34 @@ def validate_token(token):
     return str(user.get("id", ""))
 
 
+def _log_olympus_mirror_age():
+    """Warn when the Olympus checkout Salena reads from is a stale mirror.
+
+    ops/refresh-olympus-mirror.py is not run automatically, so a mirror that
+    is days or weeks old otherwise fails silently: local repository search
+    and the hosted Codex investigator both keep answering confidently from
+    code that no longer matches production.
+    """
+    raw = os.getenv("CODEBASE_OLYMPUS_PATH", "").strip()
+    if not raw:
+        return
+    marker_path = os.path.join(os.path.expanduser(raw), _OLYMPUS_MIRROR_MARKER)
+    try:
+        with open(marker_path, "r", encoding="utf-8") as handle:
+            built_at = float(handle.read().strip())
+    except (OSError, ValueError):
+        return  # Not a generated mirror (or no marker yet); nothing to report.
+    age_hours = max(0.0, (time.time() - built_at) / 3600)
+    log.info("Olympus repository mirror age: %.1f hour(s)", age_hours)
+    if age_hours > OLYMPUS_MIRROR_STALE_HOURS:
+        log.warning(
+            "Olympus repository mirror is %.1f hour(s) old (> %.1f). Repository "
+            "search and hosted Codex answers may not reflect the current code. "
+            "Refresh it: ops/refresh-olympus-mirror.py --force <olympus checkout> %s",
+            age_hours, OLYMPUS_MIRROR_STALE_HOURS, raw,
+        )
+
+
 def _check_config():
     problems = []
     if not TOKEN:
@@ -4934,6 +5131,9 @@ def main():
         ", ".join(SUPPORTED_PRODUCTS),
         "enabled" if APPROVED_FACTS_ENABLED else "disabled",
     )
+    log.info("[CODEX] configured agent runtime: %s", AGENT_RUNTIME)
+    emit_codex_trace("runtime_configured", runtime=AGENT_RUNTIME)
+    _log_olympus_mirror_age()
     for cid in sorted(ALLOWED_CHANNELS, key=lambda c: _channel_names.get(c, c)):
         log.info("    reads #%s%s", _channel_names.get(cid, cid),
                  "  <- posts here" if cid == OUTPUT_CHANNEL_ID else "")

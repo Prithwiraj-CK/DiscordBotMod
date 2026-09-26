@@ -88,6 +88,19 @@ class UsageReportingTests(unittest.TestCase):
         self.assertEqual(2_000, first["input_tokens"])
         self.assertEqual(1_000, second["input_tokens"])
 
+    def test_agents_session_usage_is_reported_with_the_turn(self):
+        with usage_reporting.support_turn_scope("agent-turn"):
+            usage_reporting.record_usage("gpt-6-astra", _Usage(), now=105, runtime="agents")
+
+        totals = usage_reporting.summarize_usage(turn_id="agent-turn")
+        self.assertEqual(1, totals["calls"])
+        self.assertEqual(1, totals["agent_sessions"])
+        self.assertEqual(0, totals["responses_calls"])
+        self.assertEqual(1_000, totals["input_tokens"])
+        self.assertEqual(600, totals["output_tokens"])
+        self.assertEqual(1, totals["unknown_cost_calls"])
+        self.assertIn("Agents sessions: 1 · Responses calls: 0", usage_reporting._format_totals(totals, "This response"))
+
 
 if __name__ == "__main__":
     unittest.main()

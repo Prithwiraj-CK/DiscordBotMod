@@ -111,15 +111,18 @@ def support_turn_scope(turn_id):
         _TURN_ID.reset(token)
 
 
-def record_usage(model, usage, now=None):
+def record_usage(model, usage, now=None, runtime="responses"):
     """Append a sanitized usage event after a successful OpenAI response."""
-    if usage is None:
-        return
     timestamp = float(time.time() if now is None else now)
     counts = usage_counts(usage)
     event = {
         "timestamp": timestamp,
         "model": str(model),
+        "runtime": str(runtime or "responses").strip().lower(),
+        # Agents usage is best-effort and may not be present in its terminal
+        # event. Preserve the session event instead of falsely reporting that
+        # no session was created or no tokens were used.
+        "usage_known": usage is not None,
         **counts,
         "estimated_cost_usd": _cost_usd(str(model), counts),
     }
@@ -193,10 +196,20 @@ def summarize_usage(since=None, until=None, turn_id=None):
         "reasoning_tokens": 0,
         "estimated_cost_usd": 0.0,
         "unknown_cost_calls": 0,
+        "unknown_usage_calls": 0,
+        "agent_sessions": 0,
+        "responses_calls": 0,
         "models": {},
     }
     for event in _load_events(since, until, turn_id=turn_id):
         totals["calls"] += 1
+        runtime = str(event.get("runtime") or "responses").lower()
+        if runtime == "agents":
+            totals["agent_sessions"] += 1
+        else:
+            totals["responses_calls"] += 1
+        if event.get("usage_known") is False:
+            totals["unknown_usage_calls"] += 1
         model = str(event.get("model") or "unknown")
         totals["models"][model] = totals["models"].get(model, 0) + 1
         for field in (
@@ -223,15 +236,20 @@ def _format_totals(totals, label):
     cost = "${:.6f}".format(totals["estimated_cost_usd"])
     if totals["unknown_cost_calls"]:
         cost += " + {} call(s) with unknown model pricing".format(totals["unknown_cost_calls"])
+    usage_note = ""
+    if totals["unknown_usage_calls"]:
+        usage_note = "\nToken usage pending for {} completed call(s)".format(totals["unknown_usage_calls"])
     return (
         "{} estimated cost: **{}**\n"
         "Calls: {} · Models: {}\n"
+        "Agents sessions: {} · Responses calls: {}\n"
         "Read: {:,} input tokens ({:,} cached; {:,} cache-write)\n"
-        "Wrote: {:,} output tokens ({:,} reasoning)"
+        "Wrote: {:,} output tokens ({:,} reasoning){}"
     ).format(
         label, cost, totals["calls"], model_text,
+        totals["agent_sessions"], totals["responses_calls"],
         totals["input_tokens"], totals["cached_input_tokens"], totals["cache_write_tokens"],
-        totals["output_tokens"], totals["reasoning_tokens"],
+        totals["output_tokens"], totals["reasoning_tokens"], usage_note,
     )
 
 

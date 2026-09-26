@@ -3,6 +3,7 @@
 import unittest
 from unittest.mock import patch
 
+import bot
 import llm
 from bot import autonomous_decision
 
@@ -66,15 +67,21 @@ class AdaptiveResearchLoopTests(unittest.TestCase):
             return final_value
 
         patches = [
+            # This suite exercises the Responses/Luna research loop only. A
+            # developer's real .env may set AGENT_RUNTIME=agents for a live
+            # pilot; that must never make an offline unit test take the
+            # hosted Codex path, make a real network call, or post to a real
+            # Discord trace webhook.
+            patch.object(bot, "AGENT_RUNTIME", "responses"),
             patch("bot.OlympusRepositoryTools", RepoTools),
             patch("bot.ask_json", side_effect=writer),
             patch("bot.ask_json_with_tools", side_effect=research),
         ]
         if budget is not None:
             patches.append(patch("bot.ResearchBudget.from_environment", return_value=budget))
-        with patches[0], patches[1], patches[2]:
-            if len(patches) == 4:
-                with patches[3]:
+        with patches[0], patches[1], patches[2], patches[3]:
+            if len(patches) == 5:
+                with patches[4]:
                     result = autonomous_decision(question, [])
             else:
                 result = autonomous_decision(question, [])

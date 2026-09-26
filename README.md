@@ -193,6 +193,32 @@ default. `CODEBASE_VALHALLA_PATH` and `REPOSITORY_SEARCH_BOTH` are retained
 only for the dormant Valhalla implementation and have no effect in the active
 Olympus-only support path.
 
+On macOS, a launchd service may not be allowed to read a checkout kept in
+`Downloads`. For the hosted-agent pilot, create a redacted local mirror and
+set `CODEBASE_OLYMPUS_PATH` to it. The source checkout is never modified:
+
+```bash
+.venv/bin/python ops/refresh-olympus-mirror.py \
+  "/path/to/olympus" \
+  "/absolute/path/to/DiscordBotMod/.runtime/olympus-agent-mirror"
+```
+
+The helper copies only the hosted snapshot allowlist and redacts secret-shaped
+lines. It refuses to overwrite an existing mirror unless you pass `--force`,
+which atomically replaces it — run this again with `--force` after updating
+Olympus, since nothing refreshes the mirror automatically:
+
+```bash
+.venv/bin/python ops/refresh-olympus-mirror.py --force \
+  "/path/to/olympus" \
+  "/absolute/path/to/DiscordBotMod/.runtime/olympus-agent-mirror"
+```
+
+Every successful build writes a `.olympus-mirror-refreshed-at` timestamp
+inside the mirror. Salena logs the mirror's age at startup so a stale mirror
+(and therefore stale hosted-agent and repository-search answers) is visible
+in the logs rather than silent.
+
 `SUPPORTED_PRODUCTS=olympus` is the authoritative live product scope. It keeps
 shared terms such as “ratio”, “wallet”, and “copy trading” inside Olympus
 unless the user explicitly names Valhalla; that explicit case is handed off
@@ -205,6 +231,36 @@ evaluation. It does **not** disable account-specific, secret, security, or
 money-risk escalation rules. Repository-only mode is useful for testing
 implementation questions, but it should not be considered a replacement for
 verified public-policy facts such as fees or product promises.
+
+### Optional hosted Codex investigation pilot
+
+`AGENT_RUNTIME=responses` is the default and keeps the existing bounded Luna
+Responses research loop. Set `AGENT_RUNTIME=agents` only for a shadow-mode
+pilot to ask an OpenAI-managed Codex agent to investigate Olympus. The Discord
+pipeline is unchanged: ingress, context collection, duplicate reservation,
+safety overrides, shadow proposal formatting, memory, and posting all remain
+in `bot.py`; the hosted agent only returns a compact investigation result.
+
+For each opt-in turn, Salena creates a text-only, redacted Olympus archive from
+the configured repository root and supplies it as bounded inline files to an
+OpenAI-hosted sandbox; it does not create a separately persisted Files API
+upload.
+The archive allowlist is exact: `apps/`, `packages/`, `docs/`, and `scripts/`,
+plus only `README.md`, `package.json`, `turbo.json`, and `bunfig.toml` at the
+repository root. It excludes `.env` files, hidden/root-private material,
+configuration directories, tests/specs, fixtures, mocks, data/database,
+storage/uploads, seeds, examples, archives, local/private directories,
+credential-shaped filenames, binary files, and private-key extensions.
+The sandbox has no outbound network, no Discord/OpenAI credentials, no
+Valhalla files, and no host filesystem access. It is an ephemeral copy, not a
+mount of the local repository. The agent must return confirmed repository
+evidence with paths and line ranges or state that the evidence is incomplete.
+If upload, session setup, execution, output validation, or timeout fails,
+Salena automatically runs the existing Responses pipeline in the same support
+turn. `AGENTS_MODEL`, `AGENTS_TIMEOUT_SECONDS`, and
+`AGENTS_MAX_SNAPSHOT_BYTES` control this pilot (the default is 64 MiB before
+compression). Hosted sessions and uploaded
+snapshots use the OpenAI API and have their own model/container costs.
 
 ### Olympus repository investigation tools
 

@@ -149,6 +149,23 @@ class OlympusRepositoryTools:
         except (OSError, UnicodeDecodeError, ValueError, TypeError) as exc:
             log.warning("Repository tool failed safely: tool=%s error=%s", name, type(exc).__name__)
             return self._error(name, "tool_unavailable")
+        except Exception:
+            # Do not disclose exception text, a traceback, paths, or the
+            # model's query in a tool result.  The opaque ID lets operators
+            # correlate the safe model-visible failure with the server-side
+            # traceback needed to repair the retrieval bug.
+            failure_id = "repo_tool_{}".format(uuid.uuid4().hex[:12])
+            log.exception(
+                "Repository tool internal failure: tool=%s failure_id=%s",
+                name,
+                failure_id,
+            )
+            return self._finish(
+                name,
+                "error",
+                {"error": "tool_internal_error", "failure_id": failure_id},
+                0,
+            )
 
     def _begin(self, name):
         if self.budget is not None:
