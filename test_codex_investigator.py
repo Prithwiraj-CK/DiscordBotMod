@@ -56,7 +56,8 @@ class HostedCodexPilotTests(unittest.TestCase):
             (root / "apps" / "api" / "src" / "service.test.ts").write_text("const testToken = 'must-not-leak';\n")
             (root / "apps" / "api" / ".private").mkdir()
             (root / "apps" / "api" / ".private" / "notes.md").write_text("must-not-leak")
-            with patch.dict(os.environ, {"CODEBASE_OLYMPUS_PATH": str(root)}, clear=False):
+            with patch.dict(os.environ, {"CODEBASE_OLYMPUS_PATH": str(root)}, clear=False), \
+                 patch("codex_investigator._OFFICIAL_FAQ_PATH", root / "missing-faq.md"):
                 snapshot = _build_snapshot()
             try:
                 with zipfile.ZipFile(snapshot) as archive:
@@ -67,6 +68,30 @@ class HostedCodexPilotTests(unittest.TestCase):
                 self.assertIn("[REDACTED]", source)
             finally:
                 os.unlink(snapshot)
+
+    def test_snapshot_includes_only_the_fixed_official_faq_reference(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / "apps" / "web").mkdir(parents=True)
+            (root / "apps" / "web" / "page.tsx").write_text("export const page = true;\n")
+            faq = root / "faq.md"
+            faq.write_text(
+                "# Olympus FAQ\n\nSource: https://www.olympusx.app/docs/08-faq\n\n" + "confirmed FAQ text\n" * 40
+            )
+            with patch.dict(os.environ, {"CODEBASE_OLYMPUS_PATH": str(root)}, clear=False), \
+                 patch("codex_investigator._OFFICIAL_FAQ_PATH", faq):
+                snapshot = _build_snapshot()
+                try:
+                    with zipfile.ZipFile(snapshot) as archive:
+                        self.assertEqual(
+                            ["olympus/apps/web/page.tsx", "olympus/official-docs/olympus-faq.md"],
+                            archive.namelist(),
+                        )
+                    _validate_evidence_against_repository([
+                        {"path": "official-docs/olympus-faq.md", "line_start": 1, "line_end": 4}
+                    ])
+                finally:
+                    os.unlink(snapshot)
 
     def test_evidence_grounding_accepts_a_real_allowlisted_citation(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -223,13 +248,17 @@ class HostedCodexPilotTests(unittest.TestCase):
             "evidence": [{"path": "src/overview.tsx", "line_start": 10, "line_end": 18}],
             "missing_information": [], "usage": {"input_tokens": 8, "output_tokens": 4},
         }
+        approved = [{"id": "olympus.settings.max_trade_size", "fact": "Max Trade Size caps one copy."}]
         with patch.object(bot, "AGENT_RUNTIME", "agents"), \
              patch("bot.investigate_olympus", return_value=investigation) as investigate, \
+             patch("bot.retrieve_facts", return_value=approved) as retrieve, \
              patch("bot.record_usage") as recorded:
             result = bot.autonomous_decision(
                 "does the graph include unrealized profit and loss?", [], force_reply=True,
             )
         investigate.assert_called_once()
+        retrieve.assert_called_once()
+        self.assertEqual(approved, investigate.call_args.kwargs["approved_facts"])
         recorded.assert_called_once_with(
             "gpt-6-luna", investigation["usage"], runtime="agents", sandbox_calls=0,
         )

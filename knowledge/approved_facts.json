@@ -347,12 +347,16 @@
       "product": "olympus",
       "topic": "copy_trading",
       "action": "answer",
-      "fact": "Olympus provides a leaderboard, top-wallet views, and per-trader pages where users can inspect potential leaders before following them.",
-      "answer_guidance": "Point users to the Olympus leaderboard or top-wallet views. Do not present any leader as guaranteed profitable; performance depends on the leader and the user's settings.",
-      "retrieval_terms": ["find wallet", "discover wallet", "leaderboard", "top wallet", "top trader", "per-trader", "choose wallet", "follow leader"],
-      "source": {"kind": "runtime_code", "ref": "olympus-main 5 frontend leaderboard, top-wallet, and per-trader flows"},
-      "last_verified": "2026-09-09",
+      "fact": "Olympus provides a leaderboard, top-wallet views, and per-trader pages where users can inspect potential leaders before following them. Staff also keep a pinned, curated list of wallets to consider in the two linked Discord channels below.",
+      "answer_guidance": "Point users to the Olympus leaderboard or top-wallet views, and share both linked channels below (their pinned posts hold the staff-curated wallet picks). Do not present any leader as guaranteed profitable; performance depends on the leader and the user's settings.",
+      "retrieval_terms": ["find wallet", "discover wallet", "leaderboard", "top wallet", "top trader", "per-trader", "choose wallet", "follow leader", "profitable wallet", "good wallet", "best wallet", "wallet to follow", "wallet to copy", "who to follow", "who to copy"],
+      "source": {"kind": "product_owner_clarification", "ref": "user clarification 2026-09-27"},
+      "last_verified": "2026-09-27",
       "risk": "high",
+      "links": [
+        "https://discord.com/channels/925207817923743794/1509446310552539267",
+        "https://discord.com/channels/925207817923743794/1484775608922673314"
+      ],
       "approved": true
     },
     {
@@ -679,12 +683,15 @@
       "product": "valhalla",
       "topic": "copy_trading",
       "action": "answer",
-      "fact": "Valhalla wallet discovery is available in the Valhalla wallets channel and through /valhalla top_trade_wallets.",
-      "answer_guidance": "Point users to the channel name and command for current examples, while making clear that historical performance is not a guarantee.",
-      "retrieval_terms": ["wallets to follow", "find wallets", "wallet discovery", "top trade wallets", "top_trade_wallets", "wallets channel"],
-      "source": {"kind": "approved_staff_example", "ref": "general and holder-chat wallet discovery replies indexed 2026-09-09"},
-      "last_verified": "2026-09-09",
+      "fact": "Valhalla wallet discovery is available in the Valhalla wallets channel and through /valhalla top_trade_wallets. Staff also keep a pinned, curated list of wallets to consider in the linked Discord channel below.",
+      "answer_guidance": "Point users to the channel name and command for current examples, and share the linked channel below (its pinned post holds staff-curated wallet picks), while making clear that historical performance is not a guarantee.",
+      "retrieval_terms": ["wallets to follow", "find wallets", "wallet discovery", "top trade wallets", "top_trade_wallets", "wallets channel", "profitable wallet", "good wallet", "best wallet", "wallet to copy", "who to follow", "who to copy"],
+      "source": {"kind": "product_owner_clarification", "ref": "user clarification 2026-09-27"},
+      "last_verified": "2026-09-27",
       "risk": "high",
+      "links": [
+        "https://discord.com/channels/925207817923743794/1484774527610392576"
+      ],
       "approved": true
     }
   ]

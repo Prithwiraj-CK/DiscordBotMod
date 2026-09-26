@@ -99,14 +99,23 @@ def retrieve_facts(query: str, product: str | None = None,
     if product == "olympus" and "backtest" in query_lower:
         related_ids.update({"olympus.copy_trade.backtesting", "olympus.performance.no_guarantee"})
     if product == "olympus" and re.search(
-        r"\b(find|choose|select)\b.*\b(wallet|trader)\b.*\b(copy|follow)\b", query_lower,
+        # "wallets?"/"traders?": a singular-only pattern here missed the far
+        # more common plural phrasing ("find wallets to follow").
+        r"\b(find|choose|select)\b.*\b(wallets?|traders?)\b.*\b(copy|follow)\b", query_lower,
     ):
-        related_ids.add("olympus.performance.no_guarantee")
+        related_ids.update({"olympus.performance.no_guarantee", "olympus.copy_trade.wallet_discovery"})
     if product == "valhalla" and re.search(
         r"\b(find|where|which)\b.*\b(wallets?|traders?)\b.*\b(follow|copy)\b",
         query_lower,
     ):
-        related_ids.add("valhalla.performance.no_guarantee")
+        related_ids.update({"valhalla.performance.no_guarantee", "valhalla.copy_trade.wallet_discovery"})
+    # Cover "profitable"/"good"/"best" wallet phrasing that skips find/choose
+    # verbs entirely (e.g. "what's a good wallet to copy"), for both products.
+    if re.search(r"\b(profitable|good|best)\b.*\b(wallets?|traders?)\b", query_lower):
+        if product == "olympus":
+            related_ids.update({"olympus.performance.no_guarantee", "olympus.copy_trade.wallet_discovery"})
+        elif product == "valhalla":
+            related_ids.update({"valhalla.performance.no_guarantee", "valhalla.copy_trade.wallet_discovery"})
     if product == "valhalla" and re.search(r"\b(?:dlmm\s+)?ratio\b", query_lower):
         related_ids.add("valhalla.copy_trade.ratio")
     if product == "valhalla" and re.search(

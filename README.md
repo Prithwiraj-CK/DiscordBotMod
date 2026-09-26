@@ -232,6 +232,21 @@ money-risk escalation rules. Repository-only mode is useful for testing
 implementation questions, but it should not be considered a replacement for
 verified public-policy facts such as fees or product promises.
 
+The hosted-agent snapshot can also contain a cached, source-labelled copy of
+the public [Olympus FAQ](https://www.olympusx.app/docs/08-faq). This is not
+live browsing: Discord questions never make web requests and the hosted
+sandbox keeps network access disabled. Refresh the one fixed official URL
+explicitly after Olympus updates its FAQ:
+
+```bash
+.venv/bin/python ops/refresh-olympus-faq.py
+```
+
+The refresh refuses an unexpected, oversized, or non-FAQ page and atomically
+replaces `knowledge/olympus_official_faq.md` only after validation. The agent
+can cite it as `official-docs/olympus-faq.md`; curated approved facts still
+take precedence if they conflict.
+
 ### Optional hosted Codex investigation pilot
 
 `AGENT_RUNTIME=responses` is the default and keeps the existing bounded Luna
