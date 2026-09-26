@@ -342,6 +342,10 @@ You may cite that file as evidence only when it directly supports the answer.
 For any conflict, the supplied LOCAL APPROVED FACTS take precedence over public
 FAQ wording; account-specific, money, security, and private-key questions must
 remain a handoff rather than a guess.
+Never imply that Olympus support will choose settings tailored to a user's
+funds, balance, or risk profile. You may explain a published setting and point
+to the Sample Settings guide when the inspected evidence supports it, but do
+not provide personalised financial recommendations.
 
 Write the "answer" field for a Discord support user who cannot see this
 snapshot or any file/function names: explain the behavior in plain language
@@ -537,15 +541,8 @@ def _aggregate_usage(usages: list[dict]) -> dict | None:
     }
 
 
-def _completed_session_usage(session_id: str, streamed_usage: dict | None) -> dict | None:
-    """Read the completed turn records before deleting this one-turn session.
-
-    Agent terminal events can omit usage. The managed API exposes best-effort
-    usage on root and delegated turns, so sum the bounded turn list when it is
-    available and retain streamed usage as the safe fallback.
-    """
-    if not session_id:
-        return streamed_usage
+def _fetch_session_usage(session_id: str) -> dict | None:
+    """One GET of the completed turn records; None if usage isn't there yet."""
     try:
         response = requests.get(
             _API_ROOT + "/agents/sessions/{}/turns".format(session_id),
@@ -555,14 +552,39 @@ def _completed_session_usage(session_id: str, streamed_usage: dict | None) -> di
         payload = response.json()
         turns = payload.get("data") if isinstance(payload, dict) else None
         if not isinstance(turns, list):
-            return streamed_usage
-        usage = _aggregate_usage([
+            return None
+        return _aggregate_usage([
             turn.get("usage") for turn in turns if isinstance(turn, dict)
         ])
-        return usage if usage is not None else streamed_usage
     except (ValueError, requests.RequestException):
-        log.info("[CODEX] completed session usage is not available yet")
+        return None
+
+
+def _completed_session_usage(session_id: str, streamed_usage: dict | None) -> dict | None:
+    """Read the completed turn records before deleting this one-turn session.
+
+    Agent terminal events can omit usage, and it is not simply missing: an
+    empirical check found the turn's own usage field literally null at the
+    instant ``turn.completed`` fires, then populated with real, non-zero
+    token counts roughly 20 seconds later on the same session, with no
+    further code-visible signal that it has arrived. Poll a few times within
+    a bounded wait before accepting "unknown" -- the alternative is that
+    every hosted investigation permanently reports zero tokens and cost
+    even though the API did track them.
+    """
+    if not session_id:
         return streamed_usage
+    max_wait = _env_int("AGENTS_USAGE_POLL_MAX_WAIT_SECONDS", 25, minimum=0)
+    interval = _env_int("AGENTS_USAGE_POLL_INTERVAL_SECONDS", 8, minimum=1)
+    deadline = time.monotonic() + max_wait
+    while True:
+        usage = _fetch_session_usage(session_id)
+        if usage is not None:
+            return usage
+        if time.monotonic() >= deadline:
+            log.info("[CODEX] completed session usage is not available yet")
+            return streamed_usage
+        time.sleep(min(interval, max(0.0, deadline - time.monotonic())))
 
 
 _JSON_FENCE_RE = re.compile(r"```(?:json)?\s*(\{.*\})\s*```", re.DOTALL)

@@ -4014,7 +4014,22 @@ def _codex_agents_decision(query, turns, product_hint=None, force_reply=False):
         )
     except Exception:
         log.exception("Could not record hosted Agents usage")
-    budget.record_response(result.get("usage"), estimated_input)
+    try:
+        budget.record_response(result.get("usage"), estimated_input)
+    except ResearchBudgetExceeded:
+        # Unlike the Responses/Luna tool loop, this is pure accounting after
+        # the fact: the one hosted call already happened and already
+        # produced (or failed to produce) `result`. The hosted sandbox's own
+        # internal context is not ours to size, so a real investigation's
+        # input tokens routinely exceed the ceiling tuned for our own
+        # iterative tool loop. Raising here would discard an already-paid-for
+        # result and downgrade a validated answer to an escalate for no
+        # protective benefit; note it for visibility and keep going.
+        budget.note_stop("token_budget_exceeded_post_hoc")
+        log.warning(
+            "[CODEX] hosted session usage exceeded the per-turn token budget "
+            "after the investigation already completed; keeping its result",
+        )
 
     status = result["status"]
     # The hosted agent can legitimately cite the same file/line range twice
@@ -4035,9 +4050,10 @@ def _codex_agents_decision(query, turns, product_hint=None, force_reply=False):
         raise CodexInvestigationUnavailable("agent_evidence_budget_exhausted")
     evidence_ids = [item["id"] for item in selected]
     if status == "confirmed":
+        answer = _agent_answer_with_required_guidance(result["answer"], evidence_ids)
         log.info("[CODEX] returning validated result to shadowmode")
         emit_codex_trace("returning_to_shadowmode", result_type="answer", evidence_count=len(evidence_ids))
-        return _decision("answer", product, intent, result["answer"], evidence_ids=evidence_ids, confidence=0.8)
+        return _decision("answer", product, intent, answer, evidence_ids=evidence_ids, confidence=0.8)
     if status == "needs_information" and result["answer"]:
         log.info("[CODEX] returning clarification to shadowmode")
         emit_codex_trace("returning_to_shadowmode", result_type="clarify", evidence_count=len(evidence_ids))
@@ -4050,6 +4066,36 @@ def _codex_agents_decision(query, turns, product_hint=None, force_reply=False):
         missing_information=result["missing_information"] or ["repository evidence incomplete"],
         confidence=0.0,
     )
+
+
+_SAMPLE_SETTINGS_EVIDENCE_PATH = "apps/web-v2/src/content/docs/05-sample-settings.mdx"
+_SAMPLE_SETTINGS_URL = "https://www.olympusx.app/docs/05-sample-settings"
+_PERSONALISED_SETTINGS_HANDOFF_RE = re.compile(
+    r"\s*(?:For|If you want) (?:a )?(?:setup|setting)s? tailored to (?:your )?funds,?\s*"
+    r"(?:please )?contact Olympus support\.?",
+    re.IGNORECASE,
+)
+
+
+def _agent_answer_with_required_guidance(answer, evidence_ids):
+    """Apply deterministic user-facing rules after a verified Agents result.
+
+    The hosted agent is allowed to explain published settings, but must not
+    imply that support provides personalised financial recommendations.  When
+    it actually cited Olympus's Sample Settings source, attach that official
+    guide rather than relying on the model to remember a link.
+    """
+    value = str(answer or "").strip()
+    value = _PERSONALISED_SETTINGS_HANDOFF_RE.sub("", value).strip()
+    has_sample_settings = any(
+        _SAMPLE_SETTINGS_EVIDENCE_PATH in str(evidence_id)
+        for evidence_id in (evidence_ids or [])
+    )
+    if has_sample_settings and _SAMPLE_SETTINGS_URL not in value:
+        value = "{}\n\nSample Settings guide: {} — give it a look before enabling copy trading.".format(
+            value, _SAMPLE_SETTINGS_URL,
+        ).strip()
+    return value
 
 
 def autonomous_decision(query, turns, product_hint=None, force_reply=False):

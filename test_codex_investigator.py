@@ -176,6 +176,75 @@ class HostedCodexPilotTests(unittest.TestCase):
         self.assertEqual(3, result["usage"]["input_tokens_details"]["cached_tokens"])
         self.assertEqual(1, delete.call_count)
 
+    def test_null_usage_is_retried_and_recovered_within_the_poll_window(self):
+        # Empirically, a completed turn's usage field is sometimes still
+        # null on the /turns endpoint at the instant it completes, and
+        # reliably appears roughly 20 seconds later on the same session
+        # with no other signal that it has arrived. One immediate check is
+        # not enough; this proves the retry loop recovers it.
+        temporary = tempfile.NamedTemporaryFile(delete=False)
+        temporary.write(b"test archive")
+        temporary.close()
+        final = json.dumps({
+            "status": "confirmed", "answer": "a",
+            "evidence": [{"path": "src/copy.ts", "line_start": 1, "line_end": 2}],
+            "missing_information": [],
+        })
+        events = [
+            'data: {"type":"agent.session.created","session_id":"sess_delay"}',
+            'data: ' + json.dumps({"type": "agent.session.turn.output_text.done", "text": final}),
+            'data: {"type":"agent.session.turn.completed","session_id":"sess_delay"}',
+        ]
+        still_pending = _Response({"data": [{"usage": None}]})
+        now_available = _Response({"data": [{"usage": {"input_tokens": 100, "output_tokens": 20}}]})
+        with patch.dict(os.environ, {
+            "OPENAI_API_KEY": "test-key",
+            "AGENTS_USAGE_POLL_MAX_WAIT_SECONDS": "30",
+            "AGENTS_USAGE_POLL_INTERVAL_SECONDS": "8",
+        }, clear=False), \
+             patch("codex_investigator._build_snapshot", return_value=temporary.name), \
+             patch("codex_investigator.requests.post", return_value=_Response(lines=events)), \
+             patch("codex_investigator.requests.get", side_effect=[still_pending, still_pending, now_available]) as get, \
+             patch("codex_investigator.requests.delete"), \
+             patch("codex_investigator._root_for", return_value=None), \
+             patch("codex_investigator.time.sleep") as sleep:
+            result = investigate_olympus("What does Max Trade Size do?", [])
+        self.assertEqual(3, get.call_count)
+        self.assertEqual(2, sleep.call_count)
+        self.assertEqual(100, result["usage"]["input_tokens"])
+
+    def test_usage_poll_gives_up_at_the_configured_wait_ceiling(self):
+        temporary = tempfile.NamedTemporaryFile(delete=False)
+        temporary.write(b"test archive")
+        temporary.close()
+        final = json.dumps({
+            "status": "confirmed", "answer": "a",
+            "evidence": [{"path": "src/copy.ts", "line_start": 1, "line_end": 2}],
+            "missing_information": [],
+        })
+        events = [
+            'data: {"type":"agent.session.created","session_id":"sess_never"}',
+            'data: ' + json.dumps({"type": "agent.session.turn.output_text.done", "text": final}),
+            'data: {"type":"agent.session.turn.completed","session_id":"sess_never"}',
+        ]
+        never_available = _Response({"data": [{"usage": None}]})
+        with patch.dict(os.environ, {
+            "OPENAI_API_KEY": "test-key",
+            "AGENTS_USAGE_POLL_MAX_WAIT_SECONDS": "0",
+        }, clear=False), \
+             patch("codex_investigator._build_snapshot", return_value=temporary.name), \
+             patch("codex_investigator.requests.post", return_value=_Response(lines=events)), \
+             patch("codex_investigator.requests.get", return_value=never_available) as get, \
+             patch("codex_investigator.requests.delete"), \
+             patch("codex_investigator._root_for", return_value=None), \
+             patch("codex_investigator.time.sleep") as sleep:
+            result = investigate_olympus("What does Max Trade Size do?", [])
+        # AGENTS_USAGE_POLL_MAX_WAIT_SECONDS=0 must still try exactly once,
+        # matching the previous single-attempt behavior, and never sleep.
+        self.assertEqual(1, get.call_count)
+        sleep.assert_not_called()
+        self.assertIsNone(result["usage"])
+
     def test_hosted_sse_decodes_utf8_punctuation(self):
         final = json.dumps({
             "status": "confirmed",
@@ -264,6 +333,51 @@ class HostedCodexPilotTests(unittest.TestCase):
         )
         self.assertEqual("answer", result["action"])
         self.assertEqual("It includes unrealized P&L.", result["draft_answer"])
+
+    def test_a_real_large_usage_count_does_not_discard_a_completed_investigation(self):
+        # Confirmed empirically: once usage actually populates, a real hosted
+        # investigation's input tokens routinely exceed the ~50k ceiling
+        # ResearchBudget applies to our own iterative Responses/Luna tool
+        # loop, because that count reflects the hosted sandbox's own
+        # internal context, not messages we chose to send. The budget check
+        # only runs *after* investigate_olympus already returned a complete,
+        # validated result, so tripping it must never turn that into
+        # [[ESCALATE]] and throw away a good, already-paid-for answer.
+        investigation = {
+            "status": "confirmed", "answer": "Real, grounded answer.",
+            "evidence": [{"path": "src/overview.tsx", "line_start": 10, "line_end": 18}],
+            "missing_information": [],
+            "usage": {"input_tokens": 142_267, "output_tokens": 3_063},
+        }
+        with patch.object(bot, "AGENT_RUNTIME", "agents"), \
+             patch("bot.investigate_olympus", return_value=investigation), \
+             patch("bot.retrieve_facts", return_value=[]), \
+             patch("bot.record_usage"):
+            result = bot.autonomous_decision("does the graph include unrealized profit and loss?", [])
+        self.assertEqual("answer", result["action"])
+        self.assertEqual("Real, grounded answer.", result["draft_answer"])
+
+    def test_sample_settings_evidence_adds_guide_and_removes_personalised_handoff(self):
+        investigation = {
+            "status": "confirmed",
+            "answer": (
+                "There is no one best setting. For a setup tailored to your funds, "
+                "please contact Olympus support."
+            ),
+            "evidence": [{
+                "path": "apps/web-v2/src/content/docs/05-sample-settings.mdx",
+                "line_start": 12, "line_end": 33,
+            }],
+            "missing_information": [], "usage": {"input_tokens": 8, "output_tokens": 4},
+        }
+        with patch.object(bot, "AGENT_RUNTIME", "agents"), \
+             patch("bot.investigate_olympus", return_value=investigation), \
+             patch("bot.retrieve_facts", return_value=[]), \
+             patch("bot.record_usage"):
+            result = bot.autonomous_decision("what is the best setting to copy?", [], force_reply=True)
+        self.assertNotIn("tailored to your funds", result["draft_answer"])
+        self.assertIn("https://www.olympusx.app/docs/05-sample-settings", result["draft_answer"])
+        self.assertIn("give it a look", result["draft_answer"])
 
     def test_unpunctuated_direct_message_clarifies_the_same_on_both_runtimes(self):
         # bot._codex_agents_decision previously used `force_reply or
