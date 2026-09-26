@@ -56,19 +56,37 @@ class UsageReportingTests(unittest.TestCase):
         self.assertNotIn("output", event)
 
     @patch("usage_reporting.requests.post")
-    def test_posts_a_new_snapshot_instead_of_editing_an_old_message(self, post):
+    def test_posts_the_completed_turn_and_cumulative_total(self, post):
         post.return_value.raise_for_status.return_value = None
         post.return_value.json.return_value = {"id": "usage-message"}
-        usage_reporting.record_usage("gpt-6-luna", _Usage(), now=102)
-        self.assertTrue(usage_reporting.send_due_report(now=100 + 86400))
-        self.assertTrue(usage_reporting.send_usage_snapshot(now=100 + 86401))
-        self.assertFalse(usage_reporting.send_due_report(now=100 + 86401))
+        with usage_reporting.support_turn_scope("turn-one"):
+            usage_reporting.record_usage("gpt-6-luna", _Usage(), now=102)
+        with usage_reporting.support_turn_scope("turn-two"):
+            usage_reporting.record_usage("gpt-6-luna", _Usage(), now=103)
+
+        self.assertTrue(usage_reporting.send_turn_snapshot("turn-two"))
         content = post.call_args.kwargs["json"]["content"]
-        self.assertIn("Estimated cost: **$0.000379**", content)
+        self.assertIn("This response estimated cost: **$0.000379**", content)
+        self.assertIn("Bot total since local tracking began", content)
+        self.assertIn("Total estimated cost: **$0.000758**", content)
         self.assertIn("Read: 1,000 input tokens", content)
         self.assertIn("Wrote: 600 output tokens (400 reasoning)", content)
-        self.assertIn("latest completed response", content)
-        self.assertEqual(2, post.call_count)
+        self.assertNotIn("Window:", content)
+        self.assertEqual(1, post.call_count)
+
+    def test_turn_scopes_keep_usage_separate(self):
+        with usage_reporting.support_turn_scope("turn-one"):
+            usage_reporting.record_usage("gpt-6-luna", _Usage(), now=102)
+            usage_reporting.record_usage("gpt-6-luna", _Usage(), now=103)
+        with usage_reporting.support_turn_scope("turn-two"):
+            usage_reporting.record_usage("gpt-6-luna", _Usage(), now=104)
+
+        first = usage_reporting.summarize_usage(turn_id="turn-one")
+        second = usage_reporting.summarize_usage(turn_id="turn-two")
+        self.assertEqual(2, first["calls"])
+        self.assertEqual(1, second["calls"])
+        self.assertEqual(2_000, first["input_tokens"])
+        self.assertEqual(1_000, second["input_tokens"])
 
 
 if __name__ == "__main__":

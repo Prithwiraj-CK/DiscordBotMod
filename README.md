@@ -116,13 +116,15 @@ It cannot run while the Mac is powered off or asleep, and it always forces
 
 Salena uses `gpt-6-luna` through the Responses API with configurable reasoning
 (`OPENAI_REASONING_EFFORT=medium` by default). Set
-`DAILY_USAGE_WEBHOOK_URL` in the ignored `.env` to receive one report every
-24 hours with estimated API cost, calls, input/cache-write/output/reasoning
-tokens, and model counts. With `USAGE_REPORT_LIVE_UPDATES=true` (the default),
-that same report message is edited after each completed support response with
-the latest rolling totals; it does not post a new message per question. The
-local `.runtime/openai_usage.jsonl` ledger stores only those counts and cost
-metadata—never Discord text, prompts, or replies.
+`DAILY_USAGE_WEBHOOK_URL` in the ignored `.env` to receive one immutable report
+for each completed support response. It shows the estimated cost, calls,
+input/cache-write/output/reasoning tokens for that exact response, followed by
+the bot's cumulative local total since tracking began. It does not use a
+rolling 24-hour window or edit an earlier Discord message. The local
+`.runtime/openai_usage.jsonl` ledger stores only token counts, opaque turn IDs,
+model identifiers, and calculated cost—never Discord text, prompts, or
+replies. The report is an estimate from response usage fields; use the OpenAI
+Usage Dashboard's **Costs** tab for invoice-reconcilable spend.
 
 ### 5.1 Bound one support turn
 

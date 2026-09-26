@@ -73,7 +73,9 @@ from support_pipeline import (
     format_calculation_response, is_supported_product, rank_evidence,
     resolve_live_product,
 )
-from usage_reporting import request_usage_report_update, start_daily_usage_reporter
+from usage_reporting import (
+    request_usage_report_update, start_daily_usage_reporter, support_turn_scope,
+)
 
 logging.basicConfig(
     level=logging.INFO,
@@ -4456,15 +4458,16 @@ def _answer(message):
 
 def _answer_safely(message):
     """Worker entry point. A worker thread must never die with an exception."""
+    turn_id = str(message.get("id") or "").strip()
     try:
-        _answer(message)
+        with support_turn_scope(turn_id):
+            _answer(message)
     except Exception:
         log.exception("Unexpected error answering message %s", message.get("id"))
     finally:
         # A support turn can make several model calls (route, research, draft,
-        # validation). Publish one new rolling cost snapshot only after the
-        # turn is done, rather than editing a message or spamming one per call.
-        request_usage_report_update()
+        # validation). Publish its exact aggregate only after the turn ends.
+        request_usage_report_update(turn_id)
 
 
 # A URL's query string is full of question marks. "look at this

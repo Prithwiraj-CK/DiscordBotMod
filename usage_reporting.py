@@ -11,7 +11,9 @@ import logging
 import os
 import threading
 import time
-from datetime import datetime, timezone
+from collections import deque
+from contextlib import contextmanager
+from contextvars import ContextVar
 from pathlib import Path
 
 import requests
@@ -24,8 +26,9 @@ _UPDATE_LOCK = threading.Lock()
 _STOP = threading.Event()
 _THREAD = None
 _UPDATE_THREAD = None
-_UPDATE_VERSION = 0
+_PENDING_TURN_IDS = deque()
 _SECONDS_PER_DAY = 24 * 60 * 60
+_TURN_ID = ContextVar("usage_turn_id", default=None)
 
 # USD per million tokens. These are saved with each event so an old report
 # remains correct after a future model-price change. Override only when OpenAI
@@ -97,6 +100,17 @@ def _cost_usd(model, counts):
     )
 
 
+@contextmanager
+def support_turn_scope(turn_id):
+    """Associate usage with one support turn without recording its contents."""
+    normalized = str(turn_id or "").strip()
+    token = _TURN_ID.set(normalized or None)
+    try:
+        yield normalized or None
+    finally:
+        _TURN_ID.reset(token)
+
+
 def record_usage(model, usage, now=None):
     """Append a sanitized usage event after a successful OpenAI response."""
     if usage is None:
@@ -109,6 +123,10 @@ def record_usage(model, usage, now=None):
         **counts,
         "estimated_cost_usd": _cost_usd(str(model), counts),
     }
+    turn_id = _TURN_ID.get()
+    if turn_id:
+        # Discord message IDs are opaque identifiers, not message content.
+        event["turn_id"] = str(turn_id)
     path = _runtime_path("USAGE_LEDGER_PATH")
     try:
         path.parent.mkdir(parents=True, exist_ok=True)
@@ -118,7 +136,7 @@ def record_usage(model, usage, now=None):
         log.exception("Could not write local OpenAI usage ledger")
 
 
-def _load_events(since, until):
+def _load_events(since=None, until=None, turn_id=None):
     path = _runtime_path("USAGE_LEDGER_PATH")
     if not path.exists():
         return []
@@ -131,7 +149,11 @@ def _load_events(since, until):
                     timestamp = float(event.get("timestamp", 0))
                 except (TypeError, ValueError, json.JSONDecodeError):
                     continue
-                if since < timestamp <= until:
+                if (
+                    (since is None or since < timestamp)
+                    and (until is None or timestamp <= until)
+                    and (turn_id is None or str(event.get("turn_id") or "") == str(turn_id))
+                ):
                     events.append(event)
     except OSError:
         log.exception("Could not read local OpenAI usage ledger")
@@ -160,7 +182,7 @@ def _save_state(state):
         log.exception("Could not save usage report state")
 
 
-def summarize_usage(since, until):
+def summarize_usage(since=None, until=None, turn_id=None):
     """Return bounded, display-ready totals for a reporting window."""
     totals = {
         "calls": 0,
@@ -173,7 +195,7 @@ def summarize_usage(since, until):
         "unknown_cost_calls": 0,
         "models": {},
     }
-    for event in _load_events(since, until):
+    for event in _load_events(since, until, turn_id=turn_id):
         totals["calls"] += 1
         model = str(event.get("model") or "unknown")
         totals["models"][model] = totals["models"].get(model, 0) + 1
@@ -191,9 +213,7 @@ def summarize_usage(since, until):
     return totals
 
 
-def _format_report(since, until, totals, title="Salena daily OpenAI usage"):
-    start = datetime.fromtimestamp(since, timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
-    end = datetime.fromtimestamp(until, timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
+def _format_totals(totals, label):
     model_text = ", ".join(
         "{} ({})".format(model, count)
         for model, count in sorted(totals["models"].items())
@@ -204,17 +224,34 @@ def _format_report(since, until, totals, title="Salena daily OpenAI usage"):
     if totals["unknown_cost_calls"]:
         cost += " + {} call(s) with unknown model pricing".format(totals["unknown_cost_calls"])
     return (
-        "**{}**\n"
-        "Window: {} → {}\n"
-        "Estimated cost: **{}**\n"
+        "{} estimated cost: **{}**\n"
         "Calls: {} · Models: {}\n"
         "Read: {:,} input tokens ({:,} cached; {:,} cache-write)\n"
         "Wrote: {:,} output tokens ({:,} reasoning)"
     ).format(
-        title, start, end, cost, totals["calls"], model_text,
+        label, cost, totals["calls"], model_text,
         totals["input_tokens"], totals["cached_input_tokens"], totals["cache_write_tokens"],
         totals["output_tokens"], totals["reasoning_tokens"],
     )
+
+
+def _format_turn_report(turn_totals, cumulative_totals):
+    """Show one completed support turn plus the lifetime local ledger total."""
+    return (
+        "**Salena OpenAI usage — completed support response**\n"
+        "{}\n\n"
+        "**Bot total since local tracking began**\n"
+        "{}"
+    ).format(
+        _format_totals(turn_totals, "This response"),
+        _format_totals(cumulative_totals, "Total"),
+    )
+
+
+def _format_cumulative_report(title="Salena OpenAI usage — cumulative"):
+    return "**{}**\n{}".format(title, _format_totals(
+        summarize_usage(), "Bot total since local tracking began",
+    ))
 
 
 def _webhook_wait_url(url):
@@ -223,21 +260,21 @@ def _webhook_wait_url(url):
     return url + separator + "wait=true"
 
 
-def _report_payload(since, until, title="Salena daily OpenAI usage"):
+def _report_payload(content):
     return {
-        "content": _format_report(since, until, summarize_usage(since, until), title),
+        "content": content,
         "allowed_mentions": {"parse": []},
     }
 
 
-def _post_report(since, until, title):
+def _post_content(content):
     """Post one immutable webhook snapshot and return whether it was accepted."""
     url = os.getenv("DAILY_USAGE_WEBHOOK_URL", "").strip()
     if not url:
         return False
     try:
         response = requests.post(
-            _webhook_wait_url(url), json=_report_payload(since, until, title), timeout=10,
+            _webhook_wait_url(url), json=_report_payload(content), timeout=10,
         )
         response.raise_for_status()
         return True
@@ -247,7 +284,7 @@ def _post_report(since, until, title):
 
 
 def send_due_report(now=None):
-    """Create the report message at the start of each 24-hour window."""
+    """Create one cumulative checkpoint at most once every 24 hours."""
     url = os.getenv("DAILY_USAGE_WEBHOOK_URL", "").strip()
     if not url:
         return False
@@ -257,38 +294,44 @@ def send_due_report(now=None):
         last_report_at = float(state.get("last_report_at", current - _SECONDS_PER_DAY))
         if current - last_report_at < _SECONDS_PER_DAY:
             return False
-        # The report always means "the last 24 hours", rather than a period
-        # beginning when this particular Discord message was created.
-        if not _post_report(current - _SECONDS_PER_DAY, current, "Salena daily OpenAI usage"):
+        if not _post_content(_format_cumulative_report("Salena OpenAI usage — cumulative")):
             return False
         _save_state({"last_report_at": current})
         return True
 
 
 def update_current_report(now=None):
-    """Backward-compatible name: publish, never edit, a rolling snapshot."""
+    """Backward-compatible name: publish a cumulative snapshot."""
     return send_usage_snapshot(now)
 
 
 def send_usage_snapshot(now=None):
-    """Post a new rolling 24-hour snapshot after one completed support turn."""
-    current = float(time.time() if now is None else now)
-    return _post_report(
-        current - _SECONDS_PER_DAY,
-        current,
-        "Salena OpenAI usage — latest completed response",
+    """Post a cumulative snapshot for manual or legacy callers."""
+    return _post_content(
+        _format_cumulative_report("Salena OpenAI usage — cumulative"),
     )
 
 
-def request_usage_report_update():
-    """Post after a completed support response without blocking the reply."""
-    global _UPDATE_THREAD, _UPDATE_VERSION
+def send_turn_snapshot(turn_id):
+    """Post the exact completed turn and the cumulative local total."""
+    normalized = str(turn_id or "").strip()
+    if not normalized:
+        return send_usage_snapshot()
+    return _post_content(_format_turn_report(
+        summarize_usage(turn_id=normalized),
+        summarize_usage(),
+    ))
+
+
+def request_usage_report_update(turn_id=None):
+    """Queue one immutable report per completed support response."""
+    global _UPDATE_THREAD
     if not os.getenv("DAILY_USAGE_WEBHOOK_URL", "").strip():
         return
     if os.getenv("USAGE_REPORT_LIVE_UPDATES", "true").strip().lower() not in {"1", "true", "yes", "on"}:
         return
     with _UPDATE_LOCK:
-        _UPDATE_VERSION += 1
+        _PENDING_TURN_IDS.append(str(turn_id or "").strip() or None)
         if _UPDATE_THREAD and _UPDATE_THREAD.is_alive():
             return
         _UPDATE_THREAD = threading.Thread(
@@ -298,20 +341,21 @@ def request_usage_report_update():
 
 
 def _live_update_loop():
-    """Coalesce completion signals into one new report message per response."""
-    global _UPDATE_VERSION
+    """Publish every queued completed-turn report without blocking a reply."""
+    global _UPDATE_THREAD
     while not _STOP.is_set():
-        # A short coalescing window avoids one webhook edit per internal router,
-        # planner, drafter, and validator call while still updating after every
-        # user message's response has finished.
+        # Let all model calls belonging to the turn finish before reading its
+        # ledger events. This batches internal calls, not Discord questions.
         if _STOP.wait(0.35):
             return
         with _UPDATE_LOCK:
-            before = _UPDATE_VERSION
-        send_usage_snapshot()
-        with _UPDATE_LOCK:
-            if _UPDATE_VERSION == before:
+            if not _PENDING_TURN_IDS:
+                _UPDATE_THREAD = None
                 return
+            pending = list(_PENDING_TURN_IDS)
+            _PENDING_TURN_IDS.clear()
+        for turn_id in pending:
+            send_turn_snapshot(turn_id)
 
 
 def start_daily_usage_reporter():
